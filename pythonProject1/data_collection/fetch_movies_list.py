@@ -5,7 +5,7 @@ import mysql.connector
 from requests.adapters import HTTPAdapter
 from urllib3 import Retry
 
-from config_sql import DB_CONFIG_SQL
+from pythonProject1.config_sql import DB_CONFIG_SQL
 
 ACCESS_TOKEN = 'eyJhbGciOiJIUzI1NiJ9.eyJhdWQiOiIzMWRjM2YxMTg4N2FjOGRjNjdmYzY1ZWY3M2ZiOWIwYSIsIm5iZiI6MTY2Mjg3NDc0Ny4xMiwic3ViIjoiNjMxZDc0N2JkYjhhMDAwMDdlZDFhNTAzIiwic2NvcGVzIjpbImFwaV9yZWFkIl0sInZlcnNpb24iOjF9.2Baz1-zRRhQTO8FKvanFxOpleZ-jDbM5jYX1AckkMss'
 # TMDb API setup

@@ -4,7 +4,7 @@ import time
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-from config_sql import DB_CONFIG_SQL
+from pythonProject1.config_sql import DB_CONFIG_SQL
 
 # -------------------------
 # Config

@@ -5,7 +5,15 @@ from typing import List
 import mysql.connector
 import os
 
-from config_sql import DB_CONFIG_SQL
+#mansel94..root
+
+DB_CONFIG_SQL = {
+    "host": "turntable.proxy.rlwy.net",
+    "port":'25998',
+    "user": "root",
+    "password": "wKpjoSFmVkahchEZrgrqoPNGyuRvbXvl",
+    "database": "trailer"
+}
 
 app = FastAPI()
 
@@ -42,7 +50,7 @@ def get_movies():
     cursor.close()
     conn.close()
     return rows
-
+'''
 @app.get("/recommendations/{user_id}")
 def recommend(user_id: int, top_n: int = 5):
     recs = get_top_recommendations(user_id, top_n)
@@ -66,4 +74,4 @@ def recommend(user_id: int, top_n: int = 5):
             "why_recommended": why
         })
 
-    return {"user_id": user_id, "recommendations": output}
+    return {"user_id": user_id, "recommendations": output}'''

@@ -19,6 +19,7 @@ class MovieWithStats(BaseModel):
     vote_average: float
     release_date: str
     popularity_score: float
+    watched: Optional[bool] = None
 
 # User rating models
 class UserRatingRequest(BaseModel):
@@ -76,4 +77,14 @@ class MovieRecommendation(BaseModel):
     predicted_score: float
     predicted_star_rating: float
     user_rating: float
-    watched: bool 
+    watched: bool
+
+# User summary model
+class UserSummary(BaseModel):
+    user_id: str
+    summary: str
+
+# Preference recommendation model
+class PreferenceRecommendation(BaseModel):
+    title: str
+    movies: List[MovieWithStats] 

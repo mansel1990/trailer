@@ -34,9 +34,14 @@ def print_swagger_info():
     print("\n• Recommendation Endpoints:")
     print("  - GET /recommendations/{clerk_user_id} - Get movie recommendations")
     
+    print("\n• User Summary Endpoints:")
+    print("  - GET /user_summary/{clerk_user_id} - Get user preferences summary")
+    print("  - GET /user_preferences_movies/{clerk_user_id} - Get movies based on user preferences (separate lists)")
+    
     print("\n• Debug Endpoints:")
     print("  - GET /debug/ratings-table - Debug ratings table")
     print("  - GET /debug/watchlist-table - Debug watchlist table")
+    print("  - GET /debug/user-preferences-table - Debug user preferences table")
     
     print("\n✨ Swagger Features:")
     print("• Interactive API documentation")

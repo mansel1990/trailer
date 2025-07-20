@@ -7,9 +7,9 @@ import os
 # Import our modules
 from models import (
     Movie, MovieWithStats, UserRatingRequest, UserRatingResponse,
-    WatchlistRequest, WatchlistResponse, MovieRecommendation, UserSummary
+    WatchlistRequest, WatchlistResponse, MovieRecommendation, UserSummary, LoginRequest
 )
-from database import execute_query
+from database import execute_query, execute_update
 from services import (
     update_user_rating_async, add_to_watchlist_async, remove_from_watchlist_async
 )
@@ -90,6 +90,138 @@ def health_check():
     - Deployment verification
     """
     return {"status": "healthy"}
+
+# ============================================================================
+# AUTHENTICATION ENDPOINTS
+# ============================================================================
+
+@app.post("/add_user", response_model=dict, tags=["Authentication"])
+async def add_user(login_request: LoginRequest):
+    """
+    # Add User
+    
+    Register a new user or update existing user information. This endpoint checks if an email already exists
+    and throws an error if it does, otherwise inserts the user into the database.
+    
+    **Features:**
+    - Email uniqueness validation
+    - Automatic user registration
+    - Clerk user ID integration
+    - Error handling for duplicate emails
+    
+    **Request Body:**
+    ```json
+    {
+      "clerkUserId": "user_2abc123def456",
+      "email": "user@example.com",
+      "firstName": "John",
+      "lastName": "Doe",
+      "imageUrl": "https://example.com/image.jpg",
+      "username": "johndoe"
+    }
+    ```
+    
+    **Parameters:**
+    - `clerkUserId` (string, required): Clerk user ID
+    - `email` (string, optional): User's email address
+    - `firstName` (string, optional): User's first name
+    - `lastName` (string, optional): User's last name
+    - `imageUrl` (string, optional): User's profile image URL
+    - `username` (string, optional): User's chosen username
+    
+    **Response:**
+    ```json
+    {
+      "message": "User registered successfully",
+      "clerk_user_id": "user_2abc123def456",
+      "username": "johndoe",
+      "status": "success"
+    }
+    ```
+    
+    **Error Responses:**
+    - `400 Bad Request`: Username already exists
+    - `500 Internal Server Error`: Database or processing error
+    
+    **Use Cases:**
+    - User registration
+    - Email validation
+    - Clerk integration
+    - User profile updates
+    """
+    try:
+        # Check if email already exists (if email is provided)
+        if login_request.email:
+            email_check_query = """
+                SELECT clerk_user_id FROM users WHERE email = %s
+            """
+            existing_user = execute_query(email_check_query, (login_request.email,))
+            
+            if existing_user:
+                # Check if the existing user is the same as the current user
+                existing_clerk_id = existing_user[0]['clerk_user_id']
+                if existing_clerk_id != login_request.clerkUserId:
+                    raise HTTPException(
+                        status_code=400, 
+                        detail=f"Email '{login_request.email}' already exists"
+                    )
+        
+        # Check if user already exists by clerk_user_id
+        user_check_query = """
+            SELECT clerk_user_id FROM users WHERE clerk_user_id = %s
+        """
+        existing_user = execute_query(user_check_query, (login_request.clerkUserId,))
+        
+        if existing_user:
+            # User already exists, update their information
+            update_query = """
+                UPDATE users 
+                SET email = %s, first_name = %s, last_name = %s, image_url = %s, username = %s
+                WHERE clerk_user_id = %s
+            """
+            
+            execute_update(update_query, (
+                login_request.email,
+                login_request.firstName,
+                login_request.lastName,
+                login_request.imageUrl,
+                login_request.username,
+                login_request.clerkUserId
+            ))
+            
+            return {
+                "message": "User information updated",
+                "clerk_user_id": login_request.clerkUserId,
+                "username": login_request.username,
+                "status": "updated"
+            }
+        
+        # Insert new user
+        insert_query = """
+            INSERT INTO users (clerk_user_id, email, first_name, last_name, image_url, username)
+            VALUES (%s, %s, %s, %s, %s, %s)
+        """
+        
+        execute_update(insert_query, (
+            login_request.clerkUserId,
+            login_request.email,
+            login_request.firstName,
+            login_request.lastName,
+            login_request.imageUrl,
+            login_request.username
+        ))
+        
+        return {
+            "message": "User registered successfully",
+            "clerk_user_id": login_request.clerkUserId,
+            "username": login_request.username,
+            "status": "success"
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error during login: {str(e)}")
 
 # ============================================================================
 # MOVIE ENDPOINTS
@@ -659,17 +791,21 @@ async def get_movie_recommendations(
                     m.poster_path,
                     DATE_FORMAT(m.release_date, '%Y-%m-%d') as release_date,
                     m.original_language,
-                    m.popularity/10 as popularity,
+                    m.popularity,
                     m.vote_count,
-                    m.vote_average*3 as vote_average,
+                    m.vote_average,
                     rm.predicted_score,
-                    (rm.predicted_score * 5 * popularity * vote_average) as final_score,
-                    (rm.predicted_score * 5) as predicted_star_rating,
+                    ur.rating as user_rating,
+                    CASE 
+                        WHEN ur.rating IS NOT NULL THEN SQRT(rm.predicted_score * 5 * ur.rating)
+                        ELSE (rm.predicted_score * 5)
+                    END as predicted_star_rating,
                     rm.watched
                 FROM recommendations_movie rm 
                 JOIN movies m ON rm.movie_id = m.id
+                LEFT JOIN user_ratings ur ON rm.movie_id = ur.movie_id AND rm.clerk_user_id = ur.clerk_user_id
                 WHERE rm.clerk_user_id = %s
-                ORDER BY (rm.predicted_score * 5) DESC
+                ORDER BY predicted_star_rating DESC
                 LIMIT %s
             """
             params = (clerk_user_id, limit)
@@ -688,13 +824,16 @@ async def get_movie_recommendations(
                     m.vote_average,
                     rm.predicted_score,
                     ur.rating as user_rating,
-                    SQRT(rm.predicted_score * 5 * ur.rating) as predicted_star_rating,
+                    CASE 
+                        WHEN ur.rating IS NOT NULL THEN SQRT(rm.predicted_score * 5 * ur.rating)
+                        ELSE (rm.predicted_score * 5)
+                    END as predicted_star_rating,
                     rm.watched
                 FROM recommendations_movie rm 
                 JOIN movies m ON rm.movie_id = m.id 
-                join user_ratings ur on rm.movie_id = ur.movie_id and rm.clerk_user_id = ur.clerk_user_id
+                left join user_ratings ur on rm.movie_id = ur.movie_id and rm.clerk_user_id = ur.clerk_user_id
                 WHERE rm.clerk_user_id = %s AND rm.watched = %s
-                ORDER BY user_rating DESC, predicted_star_rating DESC;
+                ORDER BY predicted_star_rating DESC
                 LIMIT %s
             """
             params = (clerk_user_id, watched, limit)

@@ -1,19 +1,28 @@
 from pydantic import BaseModel
 from typing import List, Optional
 
+# Login model
+class LoginRequest(BaseModel):
+    clerkUserId: str
+    email: Optional[str] = None
+    firstName: Optional[str] = None
+    lastName: Optional[str] = None
+    imageUrl: Optional[str] = None
+    username: Optional[str] = None
+
 # Basic movie model
 class Movie(BaseModel):
     id: int
     title: str
     overview: str
-    poster_path: str
+    poster_path: Optional[str] = None
 
 # Movie with statistics
 class MovieWithStats(BaseModel):
     id: int
     title: str
     overview: str
-    poster_path: str
+    poster_path: Optional[str] = None
     popularity: float
     vote_count: int
     vote_average: float
@@ -68,7 +77,7 @@ class MovieRecommendation(BaseModel):
     id: int
     title: str
     overview: str
-    poster_path: str
+    poster_path: Optional[str] = None
     release_date: str
     original_language: str
     popularity: float
@@ -76,7 +85,7 @@ class MovieRecommendation(BaseModel):
     vote_average: float
     predicted_score: float
     predicted_star_rating: float
-    user_rating: float
+    user_rating: Optional[float] = None
     watched: bool
 
 # User summary model

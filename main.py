@@ -1,6 +1,6 @@
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from typing import List, Optional
+from typing import List, Optional, Dict
 import asyncio
 import os
 
@@ -227,135 +227,210 @@ async def add_user(login_request: LoginRequest):
 # MOVIE ENDPOINTS
 # ============================================================================
 
-@app.get("/movies", response_model=List[Movie], tags=["Movies"])
-def get_movies():
+@app.get("/movies", response_model=List[MovieWithStats], tags=["Movies"])
+def get_movies(clerk_user_id: Optional[str] = Query(None, description="Clerk user ID for user-specific info")):
     """
     # Get Popular Tamil Movies
-    
     Retrieve a list of popular Tamil movies, ordered by popularity.
-    
-    **Features:**
-    - Limited to 40 movies for performance
-    - Only includes released movies (not upcoming)
-    - Ordered by popularity (highest first)
-    - Focuses on Tamil language movies
-    
-    **Response:**
-    - List of movie objects with basic information
-    - Each movie includes: id, title, overview, poster_path
-    
-    **Example Response:**
-    ```json
-    [
-      {
-        "id": 12345,
-        "title": "Amaran",
-        "overview": "A thrilling action movie...",
-        "poster_path": "/path/to/poster.jpg"
-      }
-    ]
-    ```
+    If clerk_user_id is provided, includes watched, user_rating, and is_watchlisted fields if present.
     """
     try:
-        query = """
-            SELECT id, title, overview, poster_path 
-            FROM movies 
-            WHERE original_language='ta' AND release_date<CURRENT_TIMESTAMP()
-            ORDER BY popularity DESC 
-            LIMIT 40
-        """
-        return execute_query(query)
+        if clerk_user_id:
+            query = """
+                SELECT m.id, m.title, m.overview, m.poster_path,
+                       COALESCE(m.popularity, 0) as popularity,
+                       COALESCE(m.vote_count, 0) as vote_count,
+                       COALESCE(m.vote_average, 0) as vote_average,
+                       DATE_FORMAT(m.release_date, '%Y-%m-%d') as release_date,
+                       (COALESCE(m.popularity, 0) + COALESCE(m.vote_count, 0) + COALESCE(m.vote_average, 0)) as popularity_score,
+                       ur.rating as user_rating,
+                       CASE WHEN ur.rating IS NOT NULL THEN 1 ELSE 0 END as watched,
+                       CASE WHEN w.id IS NOT NULL THEN TRUE ELSE FALSE END as is_watchlisted
+                FROM movies m
+                LEFT JOIN user_ratings ur ON m.id = ur.movie_id AND ur.clerk_user_id = %s
+                LEFT JOIN watchlist w ON m.id = w.movie_id AND w.clerk_user_id = %s
+                WHERE m.original_language='ta' AND m.release_date<CURRENT_TIMESTAMP()
+                ORDER BY m.popularity DESC 
+                LIMIT 40
+            """
+            rows = execute_query(query, (clerk_user_id, clerk_user_id))
+        else:
+            query = """
+                SELECT id, title, overview, poster_path, popularity, vote_count, vote_average, DATE_FORMAT(release_date, '%Y-%m-%d') as release_date, (COALESCE(popularity, 0) + COALESCE(vote_count, 0) + COALESCE(vote_average, 0)) as popularity_score
+                FROM movies 
+                WHERE original_language='ta' AND release_date<CURRENT_TIMESTAMP()
+                ORDER BY popularity DESC 
+                LIMIT 40
+            """
+            rows = execute_query(query)
+        for row in rows:
+            row["watched"] = bool(row.get("watched", 0))
+            row["is_watchlisted"] = bool(row.get("is_watchlisted", False))
+        return rows
     except Exception as e:
         return {"error": f"Database connection failed: {str(e)}"}
 
 @app.get("/movies/popular/recent", response_model=List[MovieWithStats], tags=["Movies"])
-def get_recent_popular_movies():
+def get_recent_popular_movies(clerk_user_id: Optional[str] = Query(None, description="Clerk user ID for user-specific info")):
     """
     # Get Recent Popular Movies
-    
     Retrieve movies from the last 3 weeks sorted by popularity score.
-    
-    **Features:**
-    - Includes movies from last 3 weeks
-    - Multi-language support (Tamil, Telugu, Kannada, Hindi, Malayalam, Bengali)
-    - Popularity score calculation: popularity + vote_count + vote_average
-    - Ordered by release date (newest first) then popularity
-    
-    **Response:**
-    - List of movie objects with detailed statistics
-    - Each movie includes: id, title, overview, poster_path, popularity, vote_count, vote_average, release_date, popularity_score
-    
-    **Use Cases:**
-    - Discover recent releases
-    - Find trending movies
-    - Browse by popularity metrics
+    If clerk_user_id is provided, includes watched, user_rating, and is_watchlisted fields if present.
     """
     try:
-        query = """
-            SELECT 
-                id, 
-                title, 
-                overview, 
-                poster_path,
-                COALESCE(popularity, 0) as popularity,
-                COALESCE(vote_count, 0) as vote_count,
-                COALESCE(vote_average, 0) as vote_average,
-                DATE_FORMAT(release_date, '%Y-%m-%d') as release_date,
-                (COALESCE(popularity, 0) + COALESCE(vote_count, 0) + COALESCE(vote_average, 0)) as popularity_score
-            FROM movies 
-            WHERE release_date >= DATE_SUB(CURRENT_DATE(), INTERVAL 3 WEEK)
-                AND release_date <= CURRENT_DATE()
-            ORDER BY release_date desc, popularity DESC
-            LIMIT 40
-        """
-        return execute_query(query)
+        if clerk_user_id:
+            query = """
+                SELECT m.id, m.title, m.overview, m.poster_path,
+                       COALESCE(m.popularity, 0) as popularity,
+                       COALESCE(m.vote_count, 0) as vote_count,
+                       COALESCE(m.vote_average, 0) as vote_average,
+                       DATE_FORMAT(m.release_date, '%Y-%m-%d') as release_date,
+                       (COALESCE(m.popularity, 0) + COALESCE(m.vote_count, 0) + COALESCE(m.vote_average, 0)) as popularity_score,
+                       ur.rating as user_rating,
+                       CASE WHEN ur.rating IS NOT NULL THEN 1 ELSE 0 END as watched,
+                       CASE WHEN w.id IS NOT NULL THEN TRUE ELSE FALSE END as is_watchlisted
+                FROM movies m
+                LEFT JOIN user_ratings ur ON m.id = ur.movie_id AND ur.clerk_user_id = %s
+                LEFT JOIN watchlist w ON m.id = w.movie_id AND w.clerk_user_id = %s
+                WHERE m.release_date >= DATE_SUB(CURRENT_DATE(), INTERVAL 3 WEEK)
+                  AND m.release_date <= CURRENT_DATE()
+                ORDER BY m.release_date desc, m.popularity DESC
+                LIMIT 40
+            """
+            rows = execute_query(query, (clerk_user_id, clerk_user_id))
+        else:
+            query = """
+                SELECT id, title, overview, poster_path, popularity, vote_count, vote_average, DATE_FORMAT(release_date, '%Y-%m-%d') as release_date, (COALESCE(popularity, 0) + COALESCE(vote_count, 0) + COALESCE(vote_average, 0)) as popularity_score
+                FROM movies 
+                WHERE release_date >= DATE_SUB(CURRENT_DATE(), INTERVAL 3 WEEK)
+                  AND release_date <= CURRENT_DATE()
+                ORDER BY release_date desc, popularity DESC
+                LIMIT 40
+            """
+            rows = execute_query(query)
+        for row in rows:
+            row["watched"] = bool(row.get("watched", 0))
+            row["is_watchlisted"] = bool(row.get("is_watchlisted", False))
+        return rows
     except Exception as e:
         return {"error": f"Database connection failed: {str(e)}"}
 
 @app.get("/movies/upcoming", response_model=List[MovieWithStats], tags=["Movies"])
-def get_upcoming_movies():
+def get_upcoming_movies(clerk_user_id: Optional[str] = Query(None, description="Clerk user ID for user-specific info")):
     """
     # Get Upcoming Movies
-    
     Retrieve movies that are going to be released in the next 4 weeks.
-    
-    **Features:**
-    - Includes movies releasing in next 4 weeks
-    - Multi-language support (Tamil, Telugu, Kannada, Hindi, Malayalam, Bengali)
-    - Popularity score calculation: popularity × vote_count × vote_average
-    - Ordered by release date (earliest first) then popularity score
-    
-    **Response:**
-    - List of movie objects with detailed statistics
-    - Each movie includes: id, title, overview, poster_path, popularity, vote_count, vote_average, release_date, popularity_score
-    
-    **Use Cases:**
-    - Plan movie watching schedule
-    - Discover new releases
-    - Stay updated with upcoming movies
+    If clerk_user_id is provided, includes watched, user_rating, and is_watchlisted fields if present.
     """
     try:
-        query = """
-            SELECT 
-                id, 
-                title, 
-                overview, 
-                poster_path,
-                COALESCE(popularity, 0) as popularity,
-                COALESCE(vote_count, 0) as vote_count,
-                COALESCE(vote_average, 0) as vote_average,
-                DATE_FORMAT(release_date, '%Y-%m-%d') as release_date,
-                (COALESCE(popularity, 0) * COALESCE(vote_count, 0) * COALESCE(vote_average, 0)) as popularity_score
-            FROM movies 
-            WHERE release_date > CURRENT_DATE()
-                AND release_date <= DATE_ADD(CURRENT_DATE(), INTERVAL 4 WEEK)
-                AND original_language IN ('ta', 'te', 'kn', 'hi', 'ml', 'bn')
-            ORDER BY release_date ASC, (COALESCE(popularity, 0) * COALESCE(vote_count, 0) * COALESCE(vote_average, 0)) DESC
-            LIMIT 40
-        """
-        return execute_query(query)
+        if clerk_user_id:
+            query = """
+                SELECT m.id, m.title, m.overview, m.poster_path,
+                       COALESCE(m.popularity, 0) as popularity,
+                       COALESCE(m.vote_count, 0) as vote_count,
+                       COALESCE(m.vote_average, 0) as vote_average,
+                       DATE_FORMAT(m.release_date, '%Y-%m-%d') as release_date,
+                       (COALESCE(m.popularity, 0) * COALESCE(m.vote_count, 0) * COALESCE(m.vote_average, 0)) as popularity_score,
+                       ur.rating as user_rating,
+                       CASE WHEN ur.rating IS NOT NULL THEN 1 ELSE 0 END as watched,
+                       CASE WHEN w.id IS NOT NULL THEN TRUE ELSE FALSE END as is_watchlisted
+                FROM movies m
+                LEFT JOIN user_ratings ur ON m.id = ur.movie_id AND ur.clerk_user_id = %s
+                LEFT JOIN watchlist w ON m.id = w.movie_id AND w.clerk_user_id = %s
+                WHERE m.release_date > CURRENT_DATE()
+                  AND m.release_date <= DATE_ADD(CURRENT_DATE(), INTERVAL 4 WEEK)
+                  AND m.original_language IN ('ta', 'te', 'kn', 'hi', 'ml', 'bn')
+                ORDER BY m.release_date ASC, popularity_score DESC
+                LIMIT 40
+            """
+            rows = execute_query(query, (clerk_user_id, clerk_user_id))
+        else:
+            query = """
+                SELECT id, title, overview, poster_path, popularity, vote_count, vote_average, DATE_FORMAT(release_date, '%Y-%m-%d') as release_date, (COALESCE(popularity, 0) * COALESCE(vote_count, 0) * COALESCE(vote_average, 0)) as popularity_score
+                FROM movies 
+                WHERE release_date > CURRENT_DATE()
+                  AND release_date <= DATE_ADD(CURRENT_DATE(), INTERVAL 4 WEEK)
+                  AND original_language IN ('ta', 'te', 'kn', 'hi', 'ml', 'bn')
+                ORDER BY release_date ASC, popularity_score DESC
+                LIMIT 40
+            """
+            rows = execute_query(query)
+        for row in rows:
+            row["watched"] = bool(row.get("watched", 0))
+            row["is_watchlisted"] = bool(row.get("is_watchlisted", False))
+        return rows
     except Exception as e:
         return {"error": f"Database connection failed: {str(e)}"}
+
+@app.get("/search", response_model=List[MovieRecommendation], tags=["Movies"])
+def search_movies(
+    q: str = Query(..., description="Search term for movie title"),
+    clerk_user_id: Optional[str] = Query(None, description="Clerk user ID for watched/user_rating info")
+):
+    """
+    # Search Movies by Title
+    Returns movies whose title contains the search term (case-insensitive substring match), ordered by popularity.
+    If clerk_user_id is provided, includes watched, user_rating, and is_watchlisted fields if present.
+    """
+    try:
+        if clerk_user_id:
+            query = """
+                SELECT m.id, m.title, m.overview, m.poster_path,
+                       DATE_FORMAT(m.release_date, '%Y-%m-%d') as release_date,
+                       m.original_language,
+                       COALESCE(m.popularity, 0) as popularity,
+                       COALESCE(m.vote_count, 0) as vote_count,
+                       COALESCE(m.vote_average, 0) as vote_average,
+                       COALESCE(rm.predicted_score, 0) as predicted_score,
+                       ur.rating as user_rating,
+                       CASE WHEN ur.rating IS NOT NULL THEN 1 ELSE COALESCE(rm.watched, 0) END as watched,
+                       CASE WHEN w.id IS NOT NULL THEN TRUE ELSE FALSE END as is_watchlisted,
+                       CASE WHEN ur.rating IS NOT NULL THEN SQRT(COALESCE(rm.predicted_score, 0) * 5 * ur.rating)
+                            ELSE (COALESCE(rm.predicted_score, 0) * 5)
+                       END as predicted_star_rating
+                FROM movies m
+                LEFT JOIN recommendations_movie rm ON m.id = rm.movie_id AND rm.clerk_user_id = %s
+                LEFT JOIN user_ratings ur ON m.id = ur.movie_id AND ur.clerk_user_id = %s
+                LEFT JOIN watchlist w ON m.id = w.movie_id AND w.clerk_user_id = %s
+                WHERE LOWER(m.title) LIKE %s
+                ORDER BY m.popularity DESC
+                LIMIT 60
+            """
+            search_pattern = f"%{q.lower()}%"
+            rows = execute_query(query, (clerk_user_id, clerk_user_id, clerk_user_id, search_pattern))
+        else:
+            query = """
+                SELECT id, title, overview, poster_path, 
+                       DATE_FORMAT(release_date, '%Y-%m-%d') as release_date,
+                       original_language, 
+                       COALESCE(popularity, 0) as popularity, 
+                       COALESCE(vote_count, 0) as vote_count, 
+                       COALESCE(vote_average, 0) as vote_average
+                FROM movies 
+                WHERE LOWER(title) LIKE %s
+                ORDER BY popularity DESC
+                LIMIT 60
+            """
+            search_pattern = f"%{q.lower()}%"
+            rows = execute_query(query, (search_pattern,))
+        results = []
+        for row in rows:
+            if clerk_user_id:
+                row["predicted_score"] = row.get("predicted_score", 0.0)
+                row["predicted_star_rating"] = row.get("predicted_star_rating", 0.0)
+                row["user_rating"] = row.get("user_rating")
+                row["watched"] = bool(row.get("watched", 0))
+                row["is_watchlisted"] = bool(row.get("is_watchlisted", False))
+            else:
+                row["predicted_score"] = 0.0
+                row["predicted_star_rating"] = 0.0
+                row["user_rating"] = None
+                row["watched"] = False
+                row["is_watchlisted"] = False
+            results.append(row)
+        return results
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Database connection failed: {str(e)}")
 
 # ============================================================================
 # RATING ENDPOINTS
@@ -434,56 +509,43 @@ async def add_user_rating(rating_request: UserRatingRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error processing rating: {str(e)}")
 
+@app.delete("/ratings/delete", response_model=Dict, tags=["Ratings"])
+async def delete_user_rating(rating_request: UserRatingRequest):
+    """
+    # Delete User Rating
+    Remove a user's rating for a specific movie.
+    
+    **Request Body:**
+    - `clerk_user_id` (string): Clerk user ID
+    - `movie_id` (integer): Movie ID
+    
+    **Response:**
+    - `message`: Status message
+    - `clerk_user_id`: Clerk user ID
+    - `movie_id`: Movie ID
+    - `status`: "deleted"
+    """
+    try:
+        delete_query = """
+            DELETE FROM user_ratings
+            WHERE clerk_user_id = %s AND movie_id = %s
+        """
+        execute_update(delete_query, (rating_request.clerk_user_id, rating_request.movie_id))
+        return {
+            "message": "User rating deleted successfully",
+            "clerk_user_id": rating_request.clerk_user_id,
+            "movie_id": rating_request.movie_id,
+            "status": "deleted"
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error deleting user rating: {str(e)}")
+
 @app.get("/ratings/{clerk_user_id}", response_model=List[UserRatingResponse], tags=["Ratings"])
 async def get_user_ratings(clerk_user_id: str):
     """
     # Get User Ratings
-    
     Retrieve all ratings for a specific user, ordered by most recently updated.
-    
-    **Features:**
-    - Returns user's complete rating history
-    - Includes movie details for each rating
-    - Shows watchlist status for each rated movie
-    - Ordered by most recent updates first
-    - Limited to 40 ratings for performance
-    
-    **Path Parameters:**
-    - `clerk_user_id` (string): Your Clerk user ID
-    
-    **Response:**
-    - List of rating objects with movie details
-    - Each rating includes: id, clerk_user_id, movie_id, rating, created_at, updated_at
-    - Movie details: title, poster_path, overview, release_date, original_language, popularity, vote_count, vote_average
-    - Watchlist status: is_watchlisted (boolean)
-    
-    **Example Response:**
-    ```json
-    [
-      {
-        "id": 1,
-        "clerk_user_id": "user_2abc123def456",
-        "movie_id": 12345,
-        "rating": 4.5,
-        "created_at": "2024-01-15 10:30:00",
-        "updated_at": "2024-01-15 10:30:00",
-        "movie_title": "Amaran",
-        "movie_poster_path": "/path/to/poster.jpg",
-        "movie_overview": "A thrilling action movie...",
-        "movie_release_date": "2024-01-10",
-        "movie_original_language": "ta",
-        "movie_popularity": 15.5,
-        "movie_vote_count": 150,
-        "movie_vote_average": 7.2,
-        "is_watchlisted": true
-      }
-    ]
-    ```
-    
-    **Use Cases:**
-    - Display user's rating history
-    - Show rated movies with details
-    - Track rating patterns
+    Now includes is_watchlisted field.
     """
     try:
         # Use string formatting with proper escaping for now
@@ -517,8 +579,11 @@ async def get_user_ratings(clerk_user_id: str):
             ORDER BY ur.updated_at DESC
             LIMIT 40
         """
-        return execute_query(query)
-        
+        rows = execute_query(query)
+        # Ensure is_watchlisted is a boolean in the response
+        for row in rows:
+            row["is_watchlisted"] = bool(row.get("is_watchlisted", False))
+        return rows
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Database connection failed: {str(e)}")
 
@@ -724,60 +789,8 @@ async def get_movie_recommendations(
 ):
     """
     # Get Movie Recommendations
-    
     Retrieve personalized movie recommendations for a user based on AI predictions and user preferences.
-    
-    **Features:**
-    - AI-powered recommendations using predicted scores
-    - Filter by watched/unwatched status
-    - Customizable result limit
-    - Multi-language movie support
-    - Final score calculation: predicted_score × 5 × popularity × vote_average
-    
-    **Path Parameters:**
-    - `clerk_user_id` (string): Your Clerk user ID
-    
-    **Query Parameters:**
-    - `watched` (optional boolean): Filter recommendations
-      - `true`: Only watched movies
-      - `false`: Only unwatched movies  
-      - `null` (default): All recommendations
-    - `limit` (integer, 1-100): Number of recommendations to return (default: 40)
-    
-    **Response:**
-    - List of movie recommendation objects
-    - Each recommendation includes: id, title, overview, poster_path, release_date, original_language, popularity, vote_count, vote_average, predicted_score, final_score, watched
-    
-    **Example Response:**
-    ```json
-    [
-      {
-        "id": 12345,
-        "title": "Amaran",
-        "overview": "A thrilling action movie...",
-        "poster_path": "/path/to/poster.jpg",
-        "release_date": "2024-01-10",
-        "original_language": "ta",
-        "popularity": 15.5,
-        "vote_count": 150,
-        "vote_average": 7.2,
-        "predicted_score": 0.85,
-        "final_score": 172.82,
-        "watched": false
-      }
-    ]
-    ```
-    
-    **Use Cases:**
-    - Discover new movies based on preferences
-    - Get personalized recommendations
-    - Filter recommendations by watch status
-    - Build recommendation engines
-    
-    **Algorithm:**
-    - Uses machine learning predictions from `recommendations_movie` table
-    - Combines predicted scores with movie popularity metrics
-    - Orders by final score for optimal recommendations
+    Now includes is_watchlisted field.
     """
     try:
         # Build the query based on watched parameter
@@ -800,10 +813,12 @@ async def get_movie_recommendations(
                         WHEN ur.rating IS NOT NULL THEN SQRT(rm.predicted_score * 5 * ur.rating)
                         ELSE (rm.predicted_score * 5)
                     END as predicted_star_rating,
-                    rm.watched
+                    rm.watched,
+                    CASE WHEN w.id IS NOT NULL THEN TRUE ELSE FALSE END as is_watchlisted
                 FROM recommendations_movie rm 
                 JOIN movies m ON rm.movie_id = m.id
                 LEFT JOIN user_ratings ur ON rm.movie_id = ur.movie_id AND rm.clerk_user_id = ur.clerk_user_id
+                LEFT JOIN watchlist w ON rm.movie_id = w.movie_id AND rm.clerk_user_id = w.clerk_user_id
                 WHERE rm.clerk_user_id = %s
                 ORDER BY predicted_star_rating DESC
                 LIMIT %s
@@ -828,18 +843,21 @@ async def get_movie_recommendations(
                         WHEN ur.rating IS NOT NULL THEN SQRT(rm.predicted_score * 5 * ur.rating)
                         ELSE (rm.predicted_score * 5)
                     END as predicted_star_rating,
-                    rm.watched
+                    rm.watched,
+                    CASE WHEN w.id IS NOT NULL THEN TRUE ELSE FALSE END as is_watchlisted
                 FROM recommendations_movie rm 
                 JOIN movies m ON rm.movie_id = m.id 
                 left join user_ratings ur on rm.movie_id = ur.movie_id and rm.clerk_user_id = ur.clerk_user_id
+                LEFT JOIN watchlist w ON rm.movie_id = w.movie_id AND rm.clerk_user_id = w.clerk_user_id
                 WHERE rm.clerk_user_id = %s AND rm.watched = %s
                 ORDER BY predicted_star_rating DESC
                 LIMIT %s
             """
             params = (clerk_user_id, watched, limit)
-        
-        return execute_query(query, params)
-        
+        rows = execute_query(query, params)
+        for row in rows:
+            row["is_watchlisted"] = bool(row.get("is_watchlisted", False))
+        return rows
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error getting recommendations: {str(e)}")
 

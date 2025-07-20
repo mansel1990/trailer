@@ -29,6 +29,8 @@ class MovieWithStats(BaseModel):
     release_date: str
     popularity_score: float
     watched: Optional[bool] = None
+    user_rating: Optional[float] = None
+    is_watchlisted: bool = False
 
 # User rating models
 class UserRatingRequest(BaseModel):
@@ -87,6 +89,7 @@ class MovieRecommendation(BaseModel):
     predicted_star_rating: float
     user_rating: Optional[float] = None
     watched: bool
+    is_watchlisted: bool = False
 
 # User summary model
 class UserSummary(BaseModel):

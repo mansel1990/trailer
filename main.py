@@ -1440,6 +1440,53 @@ async def debug_table_structure(table_name: str):
     except Exception as e:
         return {"error": f"Database error: {str(e)}"}
 
+@app.get("/movie/{movie_id}", response_model=MovieWithStats, tags=["Movies"])
+def get_movie_by_id(
+    movie_id: int,
+    clerk_user_id: Optional[str] = Query(None, description="Clerk user ID for user-specific info")
+):
+    """
+    Get a single movie by its ID. Returns the same fields as the movies listing API.
+    If clerk_user_id is provided, includes watched, user_rating, and is_watchlisted fields if present.
+    """
+    try:
+        if clerk_user_id:
+            query = """
+                SELECT m.id, m.title, m.overview, m.poster_path,
+                       COALESCE(m.popularity, 0) as popularity,
+                       COALESCE(m.vote_count, 0) as vote_count,
+                       COALESCE(m.vote_average, 0) as vote_average,
+                       DATE_FORMAT(m.release_date, '%Y-%m-%d') as release_date,
+                       (COALESCE(m.popularity, 0) + COALESCE(m.vote_count, 0) + COALESCE(m.vote_average, 0)) as popularity_score,
+                       ur.rating as user_rating,
+                       CASE WHEN ur.rating IS NOT NULL THEN 1 ELSE 0 END as watched,
+                       CASE WHEN w.id IS NOT NULL THEN TRUE ELSE FALSE END as is_watchlisted
+                FROM movies m
+                LEFT JOIN user_ratings ur ON m.id = ur.movie_id AND ur.clerk_user_id = %s
+                LEFT JOIN watchlist w ON m.id = w.movie_id AND w.clerk_user_id = %s
+                WHERE m.id = %s
+                LIMIT 1
+            """
+            rows = execute_query(query, (clerk_user_id, clerk_user_id, movie_id))
+        else:
+            query = """
+                SELECT id, title, overview, poster_path, popularity, vote_count, vote_average, DATE_FORMAT(release_date, '%Y-%m-%d') as release_date, (COALESCE(popularity, 0) + COALESCE(vote_count, 0) + COALESCE(vote_average, 0)) as popularity_score
+                FROM movies 
+                WHERE id = %s
+                LIMIT 1
+            """
+            rows = execute_query(query, (movie_id,))
+        if not rows:
+            raise HTTPException(status_code=404, detail=f"Movie with id {movie_id} not found")
+        row = rows[0]
+        row["watched"] = bool(row.get("watched", 0))
+        row["is_watchlisted"] = bool(row.get("is_watchlisted", False))
+        return row
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Database connection failed: {str(e)}")
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8000))) 

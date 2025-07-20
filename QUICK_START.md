@@ -37,6 +37,8 @@ Once the server is running, visit:
 - **API Status**: http://localhost:8000/
 - **Health Check**: http://localhost:8000/health
 - **Movies List**: http://localhost:8000/movies
+- **Recent Popular Movies**: http://localhost:8000/movies/popular/recent
+- **Upcoming Movies**: http://localhost:8000/movies/upcoming
 - **API Docs**: http://localhost:8000/docs
 
 ## 🚀 Railway Deployment

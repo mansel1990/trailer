@@ -1,20 +1,50 @@
 # Movie Trailer API
 
-A FastAPI-based REST API for movie data and recommendations, deployed on Railway.
+A FastAPI-based REST API for movie recommendations and data management.
+
+## Project Structure
+
+```
+├── main.py              # Main FastAPI application
+├── models.py            # Pydantic models for data validation
+├── database.py          # Database configuration and utilities
+├── services.py          # Business logic and background tasks
+├── test_api.py          # Simple API testing script
+├── requirements.txt     # Python dependencies
+└── README.md           # This file
+```
 
 ## Features
 
-- Movie data retrieval
-- Tamil movie recommendations
-- Health check endpoints
-- CORS enabled for frontend integration
+- **Modular Architecture**: Clean separation of concerns with dedicated modules
+- **Movie Data Management**: Retrieve and filter movie data
+- **User Rating System**: Async processing for user ratings
+- **Watchlist Management**: Add/remove movies from user watchlists
+- **Personalized Recommendations**: ML-based movie recommendations
+- **Multi-language Support**: Tamil, Telugu, Kannada, Hindi, Malayalam, Bengali
 
 ## API Endpoints
 
+### Basic Endpoints
 - `GET /` - Root endpoint with API status
 - `GET /health` - Health check endpoint
+
+### Movie Endpoints
 - `GET /movies` - Get list of Tamil movies (limited to 40, ordered by popularity)
-- `GET /movies/{movie_id}` - Get specific movie details
+- `GET /movies/popular/recent` - Get movies from last 2 weeks sorted by popularity score
+- `GET /movies/upcoming` - Get movies releasing in next 2 weeks
+
+### Rating Endpoints
+- `POST /ratings` - Add or update user rating for a movie (async processing)
+- `GET /ratings/{clerk_user_id}` - Get all ratings for a specific user
+
+### Watchlist Endpoints
+- `POST /watchlist` - Add movie to user's watchlist (async processing)
+- `GET /watchlist/{clerk_user_id}` - Get all movies in user's watchlist
+- `DELETE /remove-from-watchlist` - Remove movie from user's watchlist (async processing)
+
+### Recommendation Endpoints
+- `GET /recommendations/{clerk_user_id}` - Get movie recommendations based on predicted scores
 
 ## Local Development
 

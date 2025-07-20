@@ -38,6 +38,30 @@ def test_api():
             print(f"  Response: {response.json()}")
     except Exception as e:
         print(f"✗ Movies endpoint failed: {e}")
+    
+    # Test recent popular movies endpoint
+    try:
+        response = requests.get(f"{base_url}/movies/popular/recent")
+        print(f"✓ Recent Popular Movies endpoint: {response.status_code}")
+        if response.status_code == 200:
+            movies = response.json()
+            print(f"  Found {len(movies)} recent popular movies")
+        else:
+            print(f"  Response: {response.json()}")
+    except Exception as e:
+        print(f"✗ Recent Popular Movies endpoint failed: {e}")
+    
+    # Test upcoming movies endpoint
+    try:
+        response = requests.get(f"{base_url}/movies/upcoming")
+        print(f"✓ Upcoming Movies endpoint: {response.status_code}")
+        if response.status_code == 200:
+            movies = response.json()
+            print(f"  Found {len(movies)} upcoming movies")
+        else:
+            print(f"  Response: {response.json()}")
+    except Exception as e:
+        print(f"✗ Upcoming Movies endpoint failed: {e}")
 
 if __name__ == "__main__":
     test_api() 

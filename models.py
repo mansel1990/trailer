@@ -1,0 +1,79 @@
+from pydantic import BaseModel
+from typing import List, Optional
+
+# Basic movie model
+class Movie(BaseModel):
+    id: int
+    title: str
+    overview: str
+    poster_path: str
+
+# Movie with statistics
+class MovieWithStats(BaseModel):
+    id: int
+    title: str
+    overview: str
+    poster_path: str
+    popularity: float
+    vote_count: int
+    vote_average: float
+    release_date: str
+    popularity_score: float
+
+# User rating models
+class UserRatingRequest(BaseModel):
+    clerk_user_id: str
+    movie_id: int
+    rating: float
+
+class UserRatingResponse(BaseModel):
+    id: int
+    clerk_user_id: str
+    movie_id: int
+    rating: float
+    created_at: str
+    updated_at: str
+    movie_title: Optional[str] = None
+    movie_poster_path: Optional[str] = None
+    movie_overview: Optional[str] = None
+    movie_release_date: Optional[str] = None
+    movie_original_language: Optional[str] = None
+    movie_popularity: Optional[float] = None
+    movie_vote_count: Optional[int] = None
+    movie_vote_average: Optional[float] = None
+    is_watchlisted: Optional[bool] = None
+
+# Watchlist models
+class WatchlistRequest(BaseModel):
+    clerk_user_id: str
+    movie_id: int
+
+class WatchlistResponse(BaseModel):
+    id: int
+    clerk_user_id: str
+    movie_id: int
+    created_at: str
+    movie_title: Optional[str] = None
+    movie_poster_path: Optional[str] = None
+    movie_overview: Optional[str] = None
+    movie_release_date: Optional[str] = None
+    movie_original_language: Optional[str] = None
+    movie_popularity: Optional[float] = None
+    movie_vote_count: Optional[int] = None
+    movie_vote_average: Optional[float] = None
+
+# Movie recommendations model
+class MovieRecommendation(BaseModel):
+    id: int
+    title: str
+    overview: str
+    poster_path: str
+    release_date: str
+    original_language: str
+    popularity: float
+    vote_count: int
+    vote_average: float
+    predicted_score: float
+    predicted_star_rating: float
+    user_rating: float
+    watched: bool 

@@ -5,7 +5,20 @@ import mysql.connector
 from requests.adapters import HTTPAdapter
 from urllib3 import Retry
 
-from pythonProject1.config_sql import DB_CONFIG_SQL
+
+DB_CONFIG_SQL = {
+    "host": "turntable.proxy.rlwy.net",
+    "port":'25998',
+    "user": "root",
+    "password": "wKpjoSFmVkahchEZrgrqoPNGyuRvbXvl",
+    "database": "trailer"
+}
+
+
+
+
+
+
 
 ACCESS_TOKEN = 'eyJhbGciOiJIUzI1NiJ9.eyJhdWQiOiIzMWRjM2YxMTg4N2FjOGRjNjdmYzY1ZWY3M2ZiOWIwYSIsIm5iZiI6MTY2Mjg3NDc0Ny4xMiwic3ViIjoiNjMxZDc0N2JkYjhhMDAwMDdlZDFhNTAzIiwic2NvcGVzIjpbImFwaV9yZWFkIl0sInZlcnNpb24iOjF9.2Baz1-zRRhQTO8FKvanFxOpleZ-jDbM5jYX1AckkMss'
 # TMDb API setup
@@ -26,7 +39,7 @@ LANGUAGES = {
     'en': 'English'
 }
 
-PAGES_PER_LANGUAGE = 100  # ~2000 movies per language × 6 = ~12,000 total
+PAGES_PER_LANGUAGE = 150  # ~2000 movies per language × 6 = ~12,000 total
 DELAY_BETWEEN_REQUESTS = 0.5
 
 # -------------------------
@@ -91,10 +104,21 @@ for lang_code, lang_name in LANGUAGES.items():
             for m in movies:
                 try:
                     cur.execute("""
-                        INSERT IGNORE INTO movies(
+                        INSERT INTO movies(
                             id, title, original_title, original_language, overview,
                             release_date, popularity, vote_average, vote_count, video, poster_path
                         ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        ON DUPLICATE KEY UPDATE
+                            title = VALUES(title),
+                            original_title = VALUES(original_title),
+                            original_language = VALUES(original_language),
+                            overview = VALUES(overview),
+                            release_date = VALUES(release_date),
+                            popularity = VALUES(popularity),
+                            vote_average = VALUES(vote_average),
+                            vote_count = VALUES(vote_count),
+                            video = VALUES(video),
+                            poster_path = VALUES(poster_path)
                     """, (
                         m["id"],
                         m.get("title", ""),

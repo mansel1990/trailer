@@ -85,7 +85,7 @@ class MovieRecommendation(BaseModel):
     popularity: float
     vote_count: int
     vote_average: float
-    predicted_score: float
+    predicted_rating: float
     predicted_star_rating: float
     user_rating: Optional[float] = None
     watched: bool
@@ -100,3 +100,22 @@ class UserSummary(BaseModel):
 class PreferenceRecommendation(BaseModel):
     title: str
     movies: List[MovieWithStats] 
+
+# Semantic search models
+class SemanticSearchRequest(BaseModel):
+    description: str
+
+class SemanticMovieResult(BaseModel):
+    id: int
+    title: str
+    overview: str
+    poster_path: Optional[str] = None
+    release_date: str
+    original_language: str
+    popularity: float
+    vote_count: int
+    vote_average: float
+    similarity_score: float
+    user_rating: Optional[float] = None
+    watched: Optional[bool] = None
+    is_watchlisted: bool = False 

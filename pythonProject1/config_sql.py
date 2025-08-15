@@ -1,7 +1,8 @@
+
 DB_CONFIG_SQL = {
-    "host": "localhost",
-    "port":'9194',
+    "host": "turntable.proxy.rlwy.net",
+    "port":'25998',
     "user": "root",
-    "password": "mansel94",
+    "password": "wKpjoSFmVkahchEZrgrqoPNGyuRvbXvl",
     "database": "trailer"
 }

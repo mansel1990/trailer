@@ -3,16 +3,28 @@ from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Optional, Dict
 import asyncio
 import os
+import logging, sys
+logging.basicConfig(level=logging.DEBUG, handlers=[logging.StreamHandler(sys.stdout)])
+logger = logging.getLogger()
+import sys
 
 # Import our modules
 from models import (
     Movie, MovieWithStats, UserRatingRequest, UserRatingResponse,
-    WatchlistRequest, WatchlistResponse, MovieRecommendation, UserSummary, LoginRequest
+    WatchlistRequest, WatchlistResponse, MovieRecommendation, UserSummary, LoginRequest,
+    SemanticSearchRequest, SemanticMovieResult
 )
 from database import execute_query, execute_update
 from services import (
     update_user_rating_async, add_to_watchlist_async, remove_from_watchlist_async
 )
+
+# Add imports for embeddings
+import numpy as np
+from sentence_transformers import SentenceTransformer
+import json
+
+logger = logging.getLogger("uvicorn.error")
 
 app = FastAPI(
     title="Movie Trailer API",
@@ -381,15 +393,15 @@ def search_movies(
                        COALESCE(m.popularity, 0) as popularity,
                        COALESCE(m.vote_count, 0) as vote_count,
                        COALESCE(m.vote_average, 0) as vote_average,
-                       COALESCE(rm.predicted_score, 0) as predicted_score,
+                       COALESCE(r.predicted_rating, 0) as predicted_rating,
                        ur.rating as user_rating,
-                       CASE WHEN ur.rating IS NOT NULL THEN 1 ELSE COALESCE(rm.watched, 0) END as watched,
+                       CASE WHEN ur.rating IS NOT NULL THEN 1 ELSE 0 END as watched,
                        CASE WHEN w.id IS NOT NULL THEN TRUE ELSE FALSE END as is_watchlisted,
-                       CASE WHEN ur.rating IS NOT NULL THEN SQRT(COALESCE(rm.predicted_score, 0) * 5 * ur.rating)
-                            ELSE (COALESCE(rm.predicted_score, 0) * 5)
+                       CASE WHEN ur.rating IS NOT NULL THEN SQRT(COALESCE(r.predicted_rating, 0) * 5 * ur.rating)
+                            ELSE (COALESCE(r.predicted_rating, 0) * 5)
                        END as predicted_star_rating
                 FROM movies m
-                LEFT JOIN recommendations_movie rm ON m.id = rm.movie_id AND rm.clerk_user_id = %s
+                LEFT JOIN recommendations r ON m.id = r.movie_id AND r.user_id = %s
                 LEFT JOIN user_ratings ur ON m.id = ur.movie_id AND ur.clerk_user_id = %s
                 LEFT JOIN watchlist w ON m.id = w.movie_id AND w.clerk_user_id = %s
                 WHERE LOWER(m.title) LIKE %s
@@ -416,13 +428,13 @@ def search_movies(
         results = []
         for row in rows:
             if clerk_user_id:
-                row["predicted_score"] = row.get("predicted_score", 0.0)
+                row["predicted_rating"] = row.get("predicted_rating", 0.0)
                 row["predicted_star_rating"] = row.get("predicted_star_rating", 0.0)
                 row["user_rating"] = row.get("user_rating")
                 row["watched"] = bool(row.get("watched", 0))
                 row["is_watchlisted"] = bool(row.get("is_watchlisted", False))
             else:
-                row["predicted_score"] = 0.0
+                row["predicted_rating"] = 0.0
                 row["predicted_star_rating"] = 0.0
                 row["user_rating"] = None
                 row["watched"] = False
@@ -785,7 +797,7 @@ async def remove_from_watchlist(watchlist_request: WatchlistRequest):
 async def get_movie_recommendations(
     clerk_user_id: str, 
     watched: Optional[bool] = Query(None, description="Filter by watched status (true=watched, false=unwatched, null=all)"),
-    limit: int = Query(40, ge=1, le=100, description="Number of recommendations to return (1-100)")
+    limit: int = Query(40, ge=1, le=100)
 ):
     """
     # Get Movie Recommendations
@@ -807,25 +819,26 @@ async def get_movie_recommendations(
                     m.popularity,
                     m.vote_count,
                     m.vote_average,
-                    rm.predicted_score,
+                    r.predicted_rating,
                     ur.rating as user_rating,
                     CASE 
-                        WHEN ur.rating IS NOT NULL THEN SQRT(rm.predicted_score * 5 * ur.rating)
-                        ELSE (rm.predicted_score * 5)
+                        WHEN ur.rating IS NOT NULL THEN SQRT(r.predicted_rating * ur.rating)
+                        ELSE (r.predicted_rating )
                     END as predicted_star_rating,
-                    rm.watched,
+                    CASE WHEN ur.rating IS NOT NULL THEN 1 ELSE 0 END as watched,
                     CASE WHEN w.id IS NOT NULL THEN TRUE ELSE FALSE END as is_watchlisted
-                FROM recommendations_movie rm 
-                JOIN movies m ON rm.movie_id = m.id
-                LEFT JOIN user_ratings ur ON rm.movie_id = ur.movie_id AND rm.clerk_user_id = ur.clerk_user_id
-                LEFT JOIN watchlist w ON rm.movie_id = w.movie_id AND rm.clerk_user_id = w.clerk_user_id
-                WHERE rm.clerk_user_id = %s
-                ORDER BY predicted_star_rating DESC
+                FROM recommendations r 
+                JOIN movies m ON r.movie_id = m.id
+                LEFT JOIN user_ratings ur ON r.movie_id = ur.movie_id AND r.user_id = ur.clerk_user_id
+                LEFT JOIN watchlist w ON r.movie_id = w.movie_id AND r.user_id = w.clerk_user_id
+                WHERE r.user_id = %s
+                ORDER BY
+                (predicted_star_rating + 0.04 * m.vote_average * LOG10(GREATEST(m.vote_count, 1))) DESC
                 LIMIT %s
             """
             params = (clerk_user_id, limit)
         else:
-            # Filter by watched status
+            # Filter by watched status based on user_ratings presence
             query = """
                 SELECT 
                     m.id,
@@ -837,23 +850,26 @@ async def get_movie_recommendations(
                     m.popularity,
                     m.vote_count,
                     m.vote_average,
-                    rm.predicted_score,
+                    r.predicted_rating,
                     ur.rating as user_rating,
                     CASE 
-                        WHEN ur.rating IS NOT NULL THEN SQRT(rm.predicted_score * 5 * ur.rating)
-                        ELSE (rm.predicted_score * 5)
+                        WHEN ur.rating IS NOT NULL THEN SQRT(r.predicted_rating  * ur.rating)
+                        ELSE (r.predicted_rating)
                     END as predicted_star_rating,
-                    rm.watched,
+                    CASE WHEN ur.rating IS NOT NULL THEN 1 ELSE 0 END as watched,
                     CASE WHEN w.id IS NOT NULL THEN TRUE ELSE FALSE END as is_watchlisted
-                FROM recommendations_movie rm 
-                JOIN movies m ON rm.movie_id = m.id 
-                left join user_ratings ur on rm.movie_id = ur.movie_id and rm.clerk_user_id = ur.clerk_user_id
-                LEFT JOIN watchlist w ON rm.movie_id = w.movie_id AND rm.clerk_user_id = w.clerk_user_id
-                WHERE rm.clerk_user_id = %s AND rm.watched = %s
-                ORDER BY predicted_star_rating DESC
+                FROM recommendations r 
+                JOIN movies m ON r.movie_id = m.id 
+                LEFT JOIN user_ratings ur ON r.movie_id = ur.movie_id AND r.user_id = ur.clerk_user_id
+                LEFT JOIN watchlist w ON r.movie_id = w.movie_id AND r.user_id = w.clerk_user_id
+                WHERE r.user_id = %s AND {watched_filter}
+                ORDER BY
+                (predicted_star_rating + 0.04 * m.vote_average * LOG10(GREATEST(m.vote_count, 1))) DESC
                 LIMIT %s
             """
-            params = (clerk_user_id, watched, limit)
+            watched_filter = "ur.rating IS NOT NULL" if watched else "ur.rating IS NULL"
+            query = query.format(watched_filter=watched_filter)
+            params = (clerk_user_id, limit)
         rows = execute_query(query, params)
         for row in rows:
             row["is_watchlisted"] = bool(row.get("is_watchlisted", False))
@@ -928,63 +944,9 @@ async def get_user_preferences_movies(
     """
     # Get Movies Based on User Preferences
     
-    Retrieve movies based on user's top 3 preferences from user_preferences_summary table.
-    Returns separate lists for each preference type with descriptive titles.
+    Retrieve movies based on user's top preference for each type (cast, crew, genre, keyword) from user_preferences_summary table.
+    Returns up to four lists, one per preference type, with descriptive titles.
     
-    **Features:**
-    - Gets top 3 highest scoring preferences for each category
-    - Searches movies based on preference type:
-      - **Cast**: Movies where the cast member appears (from movie_cast table)
-      - **Crew**: Movies where crew member has the specified job role (from movie_crew table)
-      - **Keyword**: Movies where keyword appears in overview
-      - **Genre**: Movies with matching genre (from tmdb_movie_genres table)
-    - Returns separate lists for each preference type
-    - Orders results by popularity × vote_average (descending)
-    - Includes watched status for each movie
-    - Optional watched filter (true/false/None)
-    
-    **Path Parameters:**
-    - `clerk_user_id` (string): Your Clerk user ID
-    
-    **Query Parameters:**
-    - `watched` (optional string): Filter by watched status
-      - `true`: Only watched movies
-      - `false`: Only unwatched movies
-      - `None` (default): All movies
-    
-    **Response:**
-    - List of preference recommendation objects
-    - Each object includes: title (descriptive reason) and movies list
-    - Each movie includes: id, title, overview, poster_path, popularity, vote_count, vote_average, release_date, popularity_score, watched
-    
-    **Example Response:**
-    ```json
-    [
-      {
-        "title": "Because you like Karthi (Cast)",
-        "movies": [
-          {
-            "id": 12345,
-            "title": "Amaran",
-            "overview": "A thrilling action movie...",
-            "poster_path": "/path/to/poster.jpg",
-            "popularity": 15.5,
-            "vote_count": 150,
-            "vote_average": 7.2,
-                    "release_date": "2024-01-10",
-        "popularity_score": 16740.0,
-        "watched": false
-      }
-    ]
-  }
-]
-```
-    
-    **Use Cases:**
-    - Personalized movie recommendations
-    - Discover movies based on user preferences
-    - Filter by watch status
-    - Build preference-based recommendation engine
     """
     try:
         # First, get the user preferences
@@ -1004,196 +966,364 @@ async def get_user_preferences_movies(
         
         pref = preferences[0]  # Get the first (and only) row
         
-        # Collect all preferences and sort by score
-        all_preferences = []
+        # Detect available cast/crew tables dynamically
+        def detect_table_name(preferred: str, alternative: str) -> str:
+            try:
+                if execute_query("SHOW TABLES LIKE %s", (preferred,)):
+                    return preferred
+                if execute_query("SHOW TABLES LIKE %s", (alternative,)):
+                    return alternative
+            except Exception:
+                pass
+            return preferred
         
-        # Process cast preferences
-        cast_prefs = [
-            (pref['Cast_1_name'], pref['Cast_1_score'], 'cast'),
-            (pref['Cast_2_name'], pref['Cast_2_score'], 'cast'),
-            (pref['Cast_3_name'], pref['Cast_3_score'], 'cast')
-        ]
-        all_preferences.extend([(name, score, 'cast') for name, score, _ in cast_prefs if name and score > 0])
+        cast_table_name = detect_table_name('movie_cast', 'tmdb_movie_cast')
+        crew_table_name = detect_table_name('movie_crew', 'tmdb_movie_crew')
         
-        # Process crew preferences
-        crew_prefs = [
-            (pref['Crew_1_name'], pref['Crew_1_score'], 'crew'),
-            (pref['Crew_2_name'], pref['Crew_2_score'], 'crew'),
-            (pref['Crew_3_name'], pref['Crew_3_score'], 'crew')
-        ]
-        all_preferences.extend([(name, score, 'crew') for name, score, _ in crew_prefs if name and score > 0])
+        # Helper to choose the top preference name for a given list of (name, score) pairs
+        def select_top_preference(name_score_pairs):
+            valid = [(n, s) for (n, s) in name_score_pairs if n and s and s > 0]
+            if not valid:
+                return None, None
+            # Sort by score desc and pick top
+            valid.sort(key=lambda x: x[1], reverse=True)
+            return valid[0][0], valid[0][1]
         
-        # Process genre preferences
-        genre_prefs = [
-            (pref['Genre_1_name'], pref['Genre_1_score'], 'genre'),
-            (pref['Genre_2_name'], pref['Genre_2_score'], 'genre'),
-            (pref['Genre_3_name'], pref['Genre_3_score'], 'genre')
-        ]
-        all_preferences.extend([(name, score, 'genre') for name, score, _ in genre_prefs if name and score > 0])
+        # Build category-specific sorted preferences (up to top 3)
+        def build_candidates(pairs: list[tuple[str, float]]):
+            # Keep only those with names
+            named = [(n, s or 0) for (n, s) in pairs if n]
+            # Use positives if any; else keep original order (so _1 preferred)
+            positives = [(n, s) for (n, s) in named if s > 0]
+            if positives:
+                return sorted(positives, key=lambda x: x[1], reverse=True)
+            # All zero or missing scores → return in given order
+            return named
+
+        cast_candidates = build_candidates([
+            (pref.get('Cast_1_name'), pref.get('Cast_1_score')),
+            (pref.get('Cast_2_name'), pref.get('Cast_2_score')),
+            (pref.get('Cast_3_name'), pref.get('Cast_3_score')),
+        ])
         
-        # Process keyword preferences
-        keyword_prefs = [
-            (pref['Keyword_1_name'], pref['Keyword_1_score'], 'keyword'),
-            (pref['Keyword_2_name'], pref['Keyword_2_score'], 'keyword'),
-            (pref['Keyword_3_name'], pref['Keyword_3_score'], 'keyword')
-        ]
-        all_preferences.extend([(name, score, 'keyword') for name, score, _ in keyword_prefs if name and score > 0])
+        crew_candidates = build_candidates([
+            (pref.get('Crew_1_name'), pref.get('Crew_1_score')),
+            (pref.get('Crew_2_name'), pref.get('Crew_2_score')),
+            (pref.get('Crew_3_name'), pref.get('Crew_3_score')),
+        ])
         
-        # Sort by score and take top 3
-        all_preferences.sort(key=lambda x: x[1], reverse=True)
-        top_3_preferences = all_preferences[:3]
+        genre_candidates = build_candidates([
+            (pref.get('Genre_1_name'), pref.get('Genre_1_score')),
+            (pref.get('Genre_2_name'), pref.get('Genre_2_score')),
+            (pref.get('Genre_3_name'), pref.get('Genre_3_score')),
+        ])
+        
+        keyword_candidates = build_candidates([
+            (pref.get('Keyword_1_name'), pref.get('Keyword_1_score')),
+            (pref.get('Keyword_2_name'), pref.get('Keyword_2_score')),
+            (pref.get('Keyword_3_name'), pref.get('Keyword_3_score')),
+        ])
         
         results = []
         
-        for pref_name, pref_score, pref_type in top_3_preferences:
-            # Build query based on preference type
-            if pref_type == 'cast':
-                # Search in movies_cast table
-                query = """
-                    SELECT 
-                        m.id,
-                        m.title,
-                        m.overview,
-                        m.poster_path,
-                        COALESCE(m.popularity, 0) as popularity,
-                        COALESCE(m.vote_count, 0) as vote_count,
-                        COALESCE(m.vote_average, 0) as vote_average,
-                        DATE_FORMAT(m.release_date, '%Y-%m-%d') as release_date,
-                        (COALESCE(m.popularity, 0) * COALESCE(m.vote_count, 0) * COALESCE(m.vote_average, 0)) as popularity_score,
-                        CASE 
-                            WHEN rm.watched IS NOT NULL THEN rm.watched 
-                            ELSE FALSE 
-                        END AS watched
-                    FROM movies m
-                    JOIN movie_cast mc ON m.id = mc.movie_id
-                    LEFT JOIN recommendations_movie rm ON m.id = rm.movie_id AND rm.clerk_user_id = %s
-                    WHERE mc.name LIKE %s
-                """
-                params = [clerk_user_id, f"%{pref_name}%"]
-                title = f"Because you like {pref_name} (Cast)"
-                
-            elif pref_type == 'crew':
-                # Search in movie_crew table
-                if '(' in pref_name and ')' in pref_name:
-                    name_part = pref_name.split('(')[0].strip()
-                    job_part = pref_name.split('(')[1].split(')')[0].strip()
-                    query = """
-                        SELECT 
-                            m.id,
-                            m.title,
-                            m.overview,
-                            m.poster_path,
-                            COALESCE(m.popularity, 0) as popularity,
-                            COALESCE(m.vote_count, 0) as vote_count,
-                            COALESCE(m.vote_average, 0) as vote_average,
-                            DATE_FORMAT(m.release_date, '%Y-%m-%d') as release_date,
-                            (COALESCE(m.popularity, 0) * COALESCE(m.vote_count, 0) * COALESCE(m.vote_average, 0)) as popularity_score,
-                            CASE 
-                                WHEN rm.watched IS NOT NULL THEN rm.watched 
-                                ELSE FALSE 
-                            END AS watched
-                        FROM movies m
-                        JOIN movie_crew mc ON m.id = mc.movie_id
-                        LEFT JOIN recommendations_movie rm ON m.id = rm.movie_id AND rm.clerk_user_id = %s
-                        WHERE mc.name LIKE %s AND mc.job LIKE %s
-                    """
-                    params = [clerk_user_id, f"%{name_part}%", f"%{job_part}%"]
-                    title = f"Because you like {name_part} ({job_part})"
-                else:
-                    query = """
-                        SELECT 
-                            m.id,
-                            m.title,
-                            m.overview,
-                            m.poster_path,
-                            COALESCE(m.popularity, 0) as popularity,
-                            COALESCE(m.vote_count, 0) as vote_count,
-                            COALESCE(m.vote_average, 0) as vote_average,
-                            DATE_FORMAT(m.release_date, '%Y-%m-%d') as release_date,
-                            (COALESCE(m.popularity, 0) * COALESCE(m.vote_count, 0) * COALESCE(m.vote_average, 0)) as popularity_score,
-                            CASE 
-                                WHEN rm.watched IS NOT NULL THEN rm.watched 
-                                ELSE FALSE 
-                            END AS watched
-                        FROM movies m
-                        JOIN movie_crew mc ON m.id = mc.movie_id
-                        LEFT JOIN recommendations_movie rm ON m.id = rm.movie_id AND rm.clerk_user_id = %s
-                        WHERE mc.name LIKE %s
-                    """
-                    params = [clerk_user_id, f"%{pref_name}%"]
-                    title = f"Because you like {pref_name} (Crew)"
-                
-            elif pref_type == 'genre':
-                # Search in tmdb_movie_genres table
-                query = """
-                    SELECT 
-                        m.id,
-                        m.title,
-                        m.overview,
-                        m.poster_path,
-                        COALESCE(m.popularity, 0) as popularity,
-                        COALESCE(m.vote_count, 0) as vote_count,
-                        COALESCE(m.vote_average, 0) as vote_average,
-                        DATE_FORMAT(m.release_date, '%Y-%m-%d') as release_date,
-                        (COALESCE(m.popularity, 0) * COALESCE(m.vote_count, 0) * COALESCE(m.vote_average, 0)) as popularity_score,
-                        CASE 
-                            WHEN rm.watched IS NOT NULL THEN rm.watched 
-                            ELSE FALSE 
-                        END AS watched
-                    FROM movies m
-                    JOIN tmdb_movie_genres mg ON m.id = mg.movie_id
-                    LEFT JOIN recommendations_movie rm ON m.id = rm.movie_id AND rm.clerk_user_id = %s
-                    WHERE mg.tmdb_genres LIKE %s
-                """
-                params = [clerk_user_id, f"%{pref_name}%"]
-                title = f"Because you like {pref_name} (Genre)"
-                
-            elif pref_type == 'keyword':
-                # Search in movie overview
-                query = """
-                    SELECT 
-                        m.id,
-                        m.title,
-                        m.overview,
-                        m.poster_path,
-                        COALESCE(m.popularity, 0) as popularity,
-                        COALESCE(m.vote_count, 0) as vote_count,
-                        COALESCE(m.vote_average, 0) as vote_average,
-                        DATE_FORMAT(m.release_date, '%Y-%m-%d') as release_date,
-                        (COALESCE(m.popularity, 0) * COALESCE(m.vote_count, 0) * COALESCE(m.vote_average, 0)) as popularity_score,
-                        CASE 
-                            WHEN rm.watched IS NOT NULL THEN rm.watched 
-                            ELSE FALSE 
-                        END AS watched
-                    FROM movies m
-                    LEFT JOIN recommendations_movie rm ON m.id = rm.movie_id AND rm.clerk_user_id = %s
-                    WHERE m.overview LIKE %s
-                """
-                params = [clerk_user_id, f"%{pref_name}%"]
-                title = f"Because you like {pref_name} (Keyword)"
+        # Utility to add watched filter in a user-specific way
+        def append_watched_filter(base_query: str, watched_value: Optional[str], params_list: list) -> tuple[str, list]:
+            if watched_value is None:
+                return base_query, params_list
+            watched_value_lower = watched_value.lower()
+            if watched_value_lower == 'true':
+                base_query = f"{base_query} AND EXISTS (SELECT 1 FROM user_ratings ur2 WHERE ur2.movie_id = m.id AND ur2.clerk_user_id = %s)"
+                params_list.append(clerk_user_id)
+            elif watched_value_lower == 'false':
+                base_query = f"{base_query} AND NOT EXISTS (SELECT 1 FROM user_ratings ur2 WHERE ur2.movie_id = m.id AND ur2.clerk_user_id = %s)"
+                params_list.append(clerk_user_id)
+            return base_query, params_list
+        
+        # Helper to attempt a category with up to 3 candidates
+        def try_category(category: str, candidates: list):
+            nonlocal results
+            added = False
+            first_valid_title = None
+            for name, score in [(n, s) for (n, s) in candidates if n]:
+                # Prepare a fallback-friendly title for the section
+                if not first_valid_title:
+                    if category == 'crew' and '(' in name and ')' in name:
+                        name_part = name.split('(')[0].strip()
+                        job_part = name.split('(')[1].split(')')[0].strip()
+                        first_valid_title = f"Because you like {name_part} ({job_part})"
+                    else:
+                        first_valid_title = f"Because you like {name} ({category.capitalize()})"
+                try:
+                    if category == 'cast':
+                        query = f"""
+                            SELECT 
+                                m.id,
+                                m.title,
+                                m.overview,
+                                m.poster_path,
+                                COALESCE(m.popularity, 0) as popularity,
+                                COALESCE(m.vote_count, 0) as vote_count,
+                                COALESCE(m.vote_average, 0) as vote_average,
+                                DATE_FORMAT(m.release_date, '%Y-%m-%d') as release_date,
+                                (COALESCE(m.popularity, 0) * COALESCE(m.vote_count, 0) * COALESCE(m.vote_average, 0)) as popularity_score,
+                                CASE WHEN ur.rating IS NOT NULL THEN 1 ELSE 0 END AS watched,
+                                CASE WHEN w.id IS NOT NULL THEN TRUE ELSE FALSE END as is_watchlisted
+                            FROM movies m
+                            JOIN {cast_table_name} mc ON m.id = mc.movie_id
+                            LEFT JOIN user_ratings ur ON m.id = ur.movie_id AND ur.clerk_user_id = %s
+                            LEFT JOIN watchlist w ON m.id = w.movie_id AND w.clerk_user_id = %s
+                            WHERE LOWER(mc.name) LIKE %s
+                        """
+                        params = [clerk_user_id, clerk_user_id, f"%{name.lower()}%"]
+                        title = f"Because you like {name} (Cast)"
+                        
+                        # Apply watched filter and ordering
+                        query, params = append_watched_filter(query, watched, params)
+                        query = f"{query} ORDER BY (popularity * vote_average) DESC LIMIT 20"
+                        movies = execute_query(query, params)
+                        if movies:
+                            results.append({"title": title, "movies": movies})
+                            added = True
+                            return
+                    elif category == 'crew':
+                        if '(' in name and ')' in name:
+                            name_part = name.split('(')[0].strip()
+                            job_part = name.split('(')[1].split(')')[0].strip()
+                            query = f"""
+                                SELECT 
+                                    m.id,
+                                    m.title,
+                                    m.overview,
+                                    m.poster_path,
+                                    COALESCE(m.popularity, 0) as popularity,
+                                    COALESCE(m.vote_count, 0) as vote_count,
+                                    COALESCE(m.vote_average, 0) as vote_average,
+                                    DATE_FORMAT(m.release_date, '%Y-%m-%d') as release_date,
+                                    (COALESCE(m.popularity, 0) * COALESCE(m.vote_count, 0) * COALESCE(m.vote_average, 0)) as popularity_score,
+                                    CASE WHEN ur.rating IS NOT NULL THEN 1 ELSE 0 END AS watched,
+                                    CASE WHEN w.id IS NOT NULL THEN TRUE ELSE FALSE END as is_watchlisted
+                                FROM movies m
+                                JOIN {crew_table_name} mc ON m.id = mc.movie_id
+                                LEFT JOIN user_ratings ur ON m.id = ur.movie_id AND ur.clerk_user_id = %s
+                                LEFT JOIN watchlist w ON m.id = w.movie_id AND w.clerk_user_id = %s
+                                WHERE LOWER(mc.name) LIKE %s AND LOWER(mc.job) LIKE %s
+                            """
+                            params = [clerk_user_id, clerk_user_id, f"%{name_part.lower()}%", f"%{job_part.lower()}%"]
+                            title = f"Because you like {name_part} ({job_part})"
+                        else:
+                            query = f"""
+                                SELECT 
+                                    m.id,
+                                    m.title,
+                                    m.overview,
+                                    m.poster_path,
+                                    COALESCE(m.popularity, 0) as popularity,
+                                    COALESCE(m.vote_count, 0) as vote_count,
+                                    COALESCE(m.vote_average, 0) as vote_average,
+                                    DATE_FORMAT(m.release_date, '%Y-%m-%d') as release_date,
+                                    (COALESCE(m.popularity, 0) * COALESCE(m.vote_count, 0) * COALESCE(m.vote_average, 0)) as popularity_score,
+                                    CASE WHEN ur.rating IS NOT NULL THEN 1 ELSE 0 END AS watched,
+                                    CASE WHEN w.id IS NOT NULL THEN TRUE ELSE FALSE END as is_watchlisted
+                                FROM movies m
+                                JOIN {crew_table_name} mc ON m.id = mc.movie_id
+                                LEFT JOIN user_ratings ur ON m.id = ur.movie_id AND ur.clerk_user_id = %s
+                                LEFT JOIN watchlist w ON m.id = w.movie_id AND w.clerk_user_id = %s
+                                WHERE LOWER(mc.name) LIKE %s
+                            """
+                            params = [clerk_user_id, clerk_user_id, f"%{name.lower()}%"]
+                            title = f"Because you like {name} (Crew)"
+                        
+                        # Apply watched filter and ordering
+                        query, params = append_watched_filter(query, watched, params)
+                        query = f"{query} ORDER BY (popularity * vote_average) DESC LIMIT 20"
+                        movies = execute_query(query, params)
+                        
+                        # Fallback: if crew yields nothing, try department column if present
+                        if not movies:
+                            try:
+                                if '(' in name and ')' in name:
+                                    name_part = name.split('(')[0].strip().lower()
+                                    job_part = name.split('(')[1].split(')')[0].strip().lower()
+                                    dept_query = f"""
+                                        SELECT 
+                                            m.id,
+                                            m.title,
+                                            m.overview,
+                                            m.poster_path,
+                                            COALESCE(m.popularity, 0) as popularity,
+                                            COALESCE(m.vote_count, 0) as vote_count,
+                                            COALESCE(m.vote_average, 0) as vote_average,
+                                            DATE_FORMAT(m.release_date, '%Y-%m-%d') as release_date,
+                                            (COALESCE(m.popularity, 0) * COALESCE(m.vote_count, 0) * COALESCE(m.vote_average, 0)) as popularity_score,
+                                            CASE WHEN ur.rating IS NOT NULL THEN 1 ELSE 0 END AS watched,
+                                            CASE WHEN w.id IS NOT NULL THEN TRUE ELSE FALSE END as is_watchlisted
+                                        FROM movies m
+                                        JOIN {crew_table_name} mc ON m.id = mc.movie_id
+                                        LEFT JOIN user_ratings ur ON m.id = ur.movie_id AND ur.clerk_user_id = %s
+                                        LEFT JOIN watchlist w ON m.id = w.movie_id AND w.clerk_user_id = %s
+                                        WHERE LOWER(mc.name) LIKE %s AND LOWER(mc.department) LIKE %s
+                                    """
+                                    dept_params = [clerk_user_id, clerk_user_id, f"%{name_part}%", f"%{job_part}%"]
+                                else:
+                                    dept_query = f"""
+                                        SELECT 
+                                            m.id,
+                                            m.title,
+                                            m.overview,
+                                            m.poster_path,
+                                            COALESCE(m.popularity, 0) as popularity,
+                                            COALESCE(m.vote_count, 0) as vote_count,
+                                            COALESCE(m.vote_average, 0) as vote_average,
+                                            DATE_FORMAT(m.release_date, '%Y-%m-%d') as release_date,
+                                            (COALESCE(m.popularity, 0) * COALESCE(m.vote_count, 0) * COALESCE(m.vote_average, 0)) as popularity_score,
+                                            CASE WHEN ur.rating IS NOT NULL THEN 1 ELSE 0 END AS watched,
+                                            CASE WHEN w.id IS NOT NULL THEN TRUE ELSE FALSE END as is_watchlisted
+                                        FROM movies m
+                                        JOIN {crew_table_name} mc ON m.id = mc.movie_id
+                                        LEFT JOIN user_ratings ur ON m.id = ur.movie_id AND ur.clerk_user_id = %s
+                                        LEFT JOIN watchlist w ON m.id = w.movie_id AND w.clerk_user_id = %s
+                                        WHERE LOWER(mc.name) LIKE %s
+                                    """
+                                    dept_params = [clerk_user_id, clerk_user_id, f"%{name.lower()}%"]
+                                dept_query, dept_params = append_watched_filter(dept_query, watched, dept_params)
+                                dept_query = f"{dept_query} ORDER BY (popularity * vote_average) DESC LIMIT 20"
+                                movies = execute_query(dept_query, dept_params)
+                            except Exception:
+                                pass
+                        
+                        # Fallback: if crew yields nothing, try matching by cast name
+                        if not movies:
+                            fallback_query = f"""
+                                SELECT 
+                                    m.id,
+                                    m.title,
+                                    m.overview,
+                                    m.poster_path,
+                                    COALESCE(m.popularity, 0) as popularity,
+                                    COALESCE(m.vote_count, 0) as vote_count,
+                                    COALESCE(m.vote_average, 0) as vote_average,
+                                    DATE_FORMAT(m.release_date, '%Y-%m-%d') as release_date,
+                                    (COALESCE(m.popularity, 0) * COALESCE(m.vote_count, 0) * COALESCE(m.vote_average, 0)) as popularity_score,
+                                    CASE WHEN ur.rating IS NOT NULL THEN 1 ELSE 0 END AS watched,
+                                    CASE WHEN w.id IS NOT NULL THEN TRUE ELSE FALSE END as is_watchlisted
+                                FROM movies m
+                                JOIN {cast_table_name} mc ON m.id = mc.movie_id
+                                LEFT JOIN user_ratings ur ON m.id = ur.movie_id AND ur.clerk_user_id = %s
+                                LEFT JOIN watchlist w ON m.id = w.movie_id AND w.clerk_user_id = %s
+                                WHERE LOWER(mc.name) LIKE %s
+                            """
+                            fallback_params = [clerk_user_id, clerk_user_id, f"%{name.lower()}%"]
+                            fallback_query, fallback_params = append_watched_filter(fallback_query, watched, fallback_params)
+                            fallback_query = f"{fallback_query} ORDER BY (popularity * vote_average) DESC LIMIT 20"
+                            movies = execute_query(fallback_query, fallback_params)
+                        
+                        if movies:
+                            results.append({"title": title, "movies": movies})
+                            added = True
+                            return
+                    elif category == 'genre':
+                        query = """
+                            SELECT 
+                                m.id,
+                                m.title,
+                                m.overview,
+                                m.poster_path,
+                                COALESCE(m.popularity, 0) as popularity,
+                                COALESCE(m.vote_count, 0) as vote_count,
+                                COALESCE(m.vote_average, 0) as vote_average,
+                                DATE_FORMAT(m.release_date, '%Y-%m-%d') as release_date,
+                                (COALESCE(m.popularity, 0) * COALESCE(m.vote_count, 0) * COALESCE(m.vote_average, 0)) as popularity_score,
+                                CASE WHEN ur.rating IS NOT NULL THEN 1 ELSE 0 END AS watched,
+                                CASE WHEN w.id IS NOT NULL THEN TRUE ELSE FALSE END as is_watchlisted
+                            FROM movies m
+                            JOIN tmdb_movie_genres mg ON m.id = mg.movie_id
+                            LEFT JOIN user_ratings ur ON m.id = ur.movie_id AND ur.clerk_user_id = %s
+                            LEFT JOIN watchlist w ON m.id = w.movie_id AND w.clerk_user_id = %s
+                            WHERE mg.tmdb_genres LIKE %s
+                        """
+                        params = [clerk_user_id, clerk_user_id, f"%{name}%"]
+                        title = f"Because you like {name} (Genre)"
+                        
+                        query, params = append_watched_filter(query, watched, params)
+                        query = f"{query} ORDER BY (popularity * vote_average) DESC LIMIT 20"
+                        movies = execute_query(query, params)
+                        if movies:
+                            results.append({"title": title, "movies": movies})
+                            added = True
+                            return
+                    elif category == 'keyword':
+                        # Support comma-separated keywords (match any token)
+                        terms = [t.strip().lower() for t in (name or '').split(',') if t.strip()]
+                        if not terms:
+                            terms = [(name or '').lower()]
+                        base = """
+                            SELECT 
+                                m.id,
+                                m.title,
+                                m.overview,
+                                m.poster_path,
+                                COALESCE(m.popularity, 0) as popularity,
+                                COALESCE(m.vote_count, 0) as vote_count,
+                                COALESCE(m.vote_average, 0) as vote_average,
+                                DATE_FORMAT(m.release_date, '%Y-%m-%d') as release_date,
+                                (COALESCE(m.popularity, 0) * COALESCE(m.vote_count, 0) * COALESCE(m.vote_average, 0)) as popularity_score,
+                                CASE WHEN ur.rating IS NOT NULL THEN 1 ELSE 0 END AS watched,
+                                CASE WHEN w.id IS NOT NULL THEN TRUE ELSE FALSE END as is_watchlisted
+                            FROM movies m
+                            LEFT JOIN user_ratings ur ON m.id = ur.movie_id AND ur.clerk_user_id = %s
+                            LEFT JOIN watchlist w ON m.id = w.movie_id AND w.clerk_user_id = %s
+                            WHERE 
+                        """
+                        # Build OR conditions for any term in title or overview
+                        or_clauses = []
+                        like_params = []
+                        for t in terms:
+                            if not t:
+                                continue
+                            # Build variants to handle punctuation/spacing differences
+                            variants = set()
+                            variants.add(t)
+                            variants.add(t.replace(' ', '-'))
+                            variants.add(t.replace(' ', ''))
+                            # wildcard-between-words pattern
+                            words = [w for w in t.split(' ') if w]
+                            if len(words) > 1:
+                                variants.add('%'.join(words))
+                            for v in variants:
+                                or_clauses.append("LOWER(m.overview) LIKE %s")
+                                like_params.append(f"%{v}%")
+                                or_clauses.append("LOWER(m.title) LIKE %s")
+                                like_params.append(f"%{v}%")
+                        if not or_clauses:
+                            # Fallback to match anything (should not happen)
+                            or_clauses.append("LOWER(m.title) LIKE %s")
+                            like_params.append("%%")
+                        where_clause = "(" + " OR ".join(or_clauses) + ")"
+                        query = base + where_clause
+                        params = [clerk_user_id, clerk_user_id] + like_params
+                        title = f"Because you like {name} (Keyword)"
+                        
+                        query, params = append_watched_filter(query, watched, params)
+                        query = f"{query} ORDER BY (popularity * vote_average) DESC LIMIT 20"
+                        movies = execute_query(query, params)
+                        if movies:
+                            results.append({"title": title, "movies": movies})
+                            added = True
+                            return
+                except Exception as e:
+                    print(f"Warning: Could not query for {category} preference '{name}': {str(e)}")
             
-            # Add watched filter if specified
-            if watched is not None:
-                if watched.lower() == 'true':
-                    query = f"{query} AND EXISTS (SELECT 1 FROM recommendations_movie rm WHERE rm.movie_id = m.id AND rm.watched = 1)"
-                elif watched.lower() == 'false':
-                    query = f"{query} AND EXISTS (SELECT 1 FROM recommendations_movie rm WHERE rm.movie_id = m.id AND rm.watched = 0)"
-            
-            # Add ordering and limit
-            query = f"{query} ORDER BY (popularity * vote_average) DESC LIMIT 20"
-            
-            # Execute query
-            try:
-                movies = execute_query(query, params)
-                if movies:
-                    results.append({
-                        "title": title,
-                        "movies": movies
-                    })
-            except Exception as e:
-                # If table doesn't exist, skip this preference
-                print(f"Warning: Could not query for {pref_type} preference '{pref_name}': {str(e)}")
-                continue
+            # If we reach here, no candidate produced movies; still return a section (empty list)
+            if first_valid_title is None:
+                # If absolutely no valid candidate, create a generic title for the category
+                first_valid_title = f"Because you like {category.capitalize()}"
+            results.append({"title": first_valid_title, "movies": []})
+            return
+        
+        try_category('cast', cast_candidates)
+        try_category('crew', crew_candidates)
+        try_category('genre', genre_candidates)
+        try_category('keyword', keyword_candidates)
         
         return results
         
@@ -1486,6 +1616,420 @@ def get_movie_by_id(
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Database connection failed: {str(e)}")
+
+@app.post("/semantic-search", response_model=List[SemanticMovieResult], tags=["Movies"])
+async def semantic_movie_search(
+    search_request: SemanticSearchRequest,
+    clerk_user_id: Optional[str] = Query(None, description="Clerk user ID for user-specific info")
+):
+    """
+    # Semantic Movie Search
+    
+    Find movies similar to a given description using embeddings and cosine similarity.
+    Uses database-level cosine similarity function for efficient calculation.
+    
+    **Features:**
+    - Converts user description to embeddings
+    - Uses MySQL COSINE_SIMILARITY function for fast similarity calculation
+    - Returns top 10 most similar movies
+    - Includes user-specific info if clerk_user_id provided
+    
+    **Request Body:**
+    ```json
+    {
+      "description": "A thrilling action movie with car chases and explosions"
+    }
+    ```
+    
+    **Parameters:**
+    - `description` (string): Movie description to search for
+    - `clerk_user_id` (optional): Clerk user ID for user-specific info
+    
+    **Response:**
+    - List of movies with similarity scores
+    - Each movie includes: id, title, overview, poster_path, release_date, 
+      original_language, popularity, vote_count, vote_average, similarity_score
+    - If clerk_user_id provided: user_rating, watched, is_watchlisted
+    """
+    try:
+        # Load the embedding model
+        model = SentenceTransformer('all-MiniLM-L6-v2')
+        
+        # Generate embedding for the search description
+        search_embedding = model.encode(search_request.description)
+        search_embedding_json = json.dumps(search_embedding.tolist())
+        
+        # Build the query using the COSINE_SIMILARITY function
+        if clerk_user_id:
+            query = """
+                SELECT 
+                    m.id,
+                    m.title,
+                    m.overview,
+                    m.poster_path,
+                    DATE_FORMAT(m.release_date, '%Y-%m-%d') as release_date,
+                    m.original_language,
+                    m.popularity,
+                    m.vote_count,
+                    m.vote_average,
+                    ur.rating as user_rating,
+                    CASE WHEN ur.rating IS NOT NULL THEN 1 ELSE 0 END as watched,
+                    CASE WHEN w.id IS NOT NULL THEN TRUE ELSE FALSE END as is_watchlisted,
+                    COSINE_SIMILARITY(me.embedding_vector, %s) as similarity_score
+                FROM movies m
+                JOIN movie_embeddings me ON m.id = me.movie_id
+                LEFT JOIN user_ratings ur ON m.id = ur.movie_id AND ur.clerk_user_id = %s
+                LEFT JOIN watchlist w ON m.id = w.movie_id AND w.clerk_user_id = %s
+                WHERE me.embedding_vector IS NOT NULL
+                HAVING similarity_score IS NOT NULL
+                ORDER BY similarity_score DESC
+                LIMIT 10
+            """
+            params = (search_embedding_json, clerk_user_id, clerk_user_id)
+        else:
+            query = """
+                SELECT 
+                    m.id,
+                    m.title,
+                    m.overview,
+                    m.poster_path,
+                    DATE_FORMAT(m.release_date, '%Y-%m-%d') as release_date,
+                    m.original_language,
+                    m.popularity,
+                    m.vote_count,
+                    m.vote_average,
+                    COSINE_SIMILARITY(me.embedding_vector, %s) as similarity_score
+                FROM movies m
+                JOIN movie_embeddings me ON m.id = me.movie_id
+                WHERE me.embedding_vector IS NOT NULL
+                HAVING similarity_score IS NOT NULL
+                ORDER BY similarity_score DESC
+                LIMIT 10
+            """
+            params = (search_embedding_json,)
+        
+        rows = execute_query(query, params)
+        
+        if not rows:
+            raise HTTPException(status_code=404, detail="No movie embeddings found in database")
+        
+        # Format results
+        results = []
+        for row in rows:
+            result = {
+                'id': row['id'],
+                'title': row['title'],
+                'overview': row['overview'],
+                'poster_path': row['poster_path'],
+                'release_date': row['release_date'],
+                'original_language': row['original_language'],
+                'popularity': float(row['popularity'] or 0),
+                'vote_count': int(row['vote_count'] or 0),
+                'vote_average': float(row['vote_average'] or 0),
+                'similarity_score': float(row['similarity_score'] or 0)
+            }
+            
+            if clerk_user_id:
+                result['user_rating'] = row.get('user_rating')
+                result['watched'] = bool(row.get('watched', 0))
+                result['is_watchlisted'] = bool(row.get('is_watchlisted', False))
+            else:
+                result['user_rating'] = None
+                result['watched'] = None
+                result['is_watchlisted'] = False
+            
+            results.append(result)
+        
+        return results
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error in semantic search: {str(e)}")
+
+@app.get("/filters/cast/autocomplete", response_model=List[str], tags=["Filters"])
+async def autocomplete_cast(q: str = Query(..., min_length=1), limit: int = Query(10, ge=1, le=50)):
+    try:
+        # Prefer detected cast table if available
+        table = "movie_cast"
+        try:
+            if not execute_query("SHOW TABLES LIKE 'movie_cast'") and execute_query("SHOW TABLES LIKE 'tmdb_movie_cast'"):
+                table = "tmdb_movie_cast"
+        except Exception:
+            pass
+        query = f"""
+            SELECT mc.name
+            FROM {table} mc
+            WHERE mc.name LIKE %s
+            GROUP BY mc.name
+            ORDER BY COUNT(*) DESC
+            LIMIT %s
+        """
+        rows = execute_query(query, (f"%{q}%", limit))
+        return [r['name'] for r in rows]
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error getting cast autocomplete: {str(e)}")
+
+@app.get("/filters/crew/autocomplete", response_model=List[str], tags=["Filters"])
+async def autocomplete_crew(q: str = Query(..., min_length=1), limit: int = Query(10, ge=1, le=50)):
+    try:
+        table = "movie_crew"
+        try:
+            if not execute_query("SHOW TABLES LIKE 'movie_crew'") and execute_query("SHOW TABLES LIKE 'tmdb_movie_crew'"):
+                table = "tmdb_movie_crew"
+        except Exception:
+            pass
+        query = f"""
+            SELECT mc.name
+            FROM {table} mc
+            WHERE mc.name LIKE %s
+            GROUP BY mc.name
+            ORDER BY COUNT(*) DESC
+            LIMIT %s
+        """
+        rows = execute_query(query, (f"%{q}%", limit))
+        return [r['name'] for r in rows]
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error getting crew autocomplete: {str(e)}")
+
+@app.get("/filters/genres", response_model=List[str], tags=["Filters"])
+async def list_genres(limit: int = Query(100, ge=1, le=500)):
+    try:
+        # Pull genre arrays and extract individual items
+        rows = execute_query("SELECT tmdb_genres FROM tmdb_movie_genres LIMIT 1000")
+        seen = set()
+        for row in rows:
+            raw = row.get('tmdb_genres')
+            if raw is None:
+                continue
+            try:
+                # Try parse as JSON array: ["adventure", "action", ...]
+                if isinstance(raw, str):
+                    parsed = json.loads(raw)
+                else:
+                    parsed = raw
+                if isinstance(parsed, list):
+                    for g in parsed:
+                        if isinstance(g, str) and g.strip():
+                            seen.add(g.strip())
+                    continue
+            except Exception:
+                pass
+            # Fallback: treat as comma-separated string
+            text = str(raw)
+            # Remove brackets/quotes if present
+            text = text.replace('[', '').replace(']', '').replace('"', '').replace("'", '')
+            parts = [p.strip() for p in text.split(',') if p.strip()]
+            for p in parts:
+                seen.add(p)
+        genres = sorted(seen)
+        return genres[:limit]
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error listing genres: {str(e)}")
+
+@app.get("/filters/languages", response_model=List[str], tags=["Filters"])
+async def list_languages(limit: int = Query(50, ge=1, le=200)):
+    try:
+        rows = execute_query("SELECT DISTINCT original_language FROM movies WHERE original_language IS NOT NULL AND original_language<>'' ORDER BY original_language ASC LIMIT %s", (limit,))
+        return [r['original_language'] for r in rows]
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error listing languages: {str(e)}")
+
+@app.get("/recommendations_filtered", response_model=List[MovieRecommendation], tags=["Recommendations"])
+async def get_filtered_recommendations(
+    clerk_user_id: str,
+    cast: Optional[List[str]] = Query(None, description="Cast names to include"),
+    crew: Optional[List[str]] = Query(None, description="Crew names to include"),
+    genres: Optional[List[str]] = Query(None, description="Genres to include"),
+    languages: Optional[List[str]] = Query(None, description="Original languages (e.g., ta, te)"),
+    watched: Optional[bool] = Query(None, description="true for watched only, false for unwatched only"),
+    semantic_query: Optional[str] = Query(None, description="Free-text semantic search to boost/filter"),
+    limit: int = Query(40, ge=1, le=100)
+):
+    try:
+        def build_and_execute(
+            include_cast: bool,
+            include_crew: bool,
+            include_genres: bool,
+            include_languages: bool,
+            include_watched: bool,
+            use_primary_semantic: bool
+        ):
+            
+            print(f"[filtered] attempt: cast={include_cast} crew={include_crew} genres={include_genres} langs={include_languages} watched={include_watched} semantic={'primary' if semantic_query and use_primary_semantic else ('fallback' if semantic_query and not use_primary_semantic else 'off')}", flush=True)
+            joins = [
+                "FROM recommendations r",
+                "JOIN movies m ON r.movie_id = m.id",
+                "LEFT JOIN user_ratings ur ON r.movie_id = ur.movie_id AND r.user_id = ur.clerk_user_id",
+                "LEFT JOIN watchlist w ON r.movie_id = w.movie_id AND r.user_id = w.clerk_user_id"
+            ]
+            where_clauses = ["r.user_id = %s"]
+            params_local: List = [clerk_user_id]
+
+            # Optional joins/filters
+            if include_cast and cast:
+                cast_table = 'movie_cast'
+                try:
+                    if not execute_query("SHOW TABLES LIKE 'movie_cast'") and execute_query("SHOW TABLES LIKE 'tmdb_movie_cast'"):
+                        cast_table = 'tmdb_movie_cast'
+                except Exception:
+                    pass
+                joins.append(f"JOIN {cast_table} mcF ON m.id = mcF.movie_id")
+                or_count = len(cast)
+                for name in cast:
+                    params_local.append(f"%{name.lower()}%")
+                where_clauses.append("(" + " OR ".join(["LOWER(mcF.name) LIKE %s"]*or_count) + ")")
+
+            if include_crew and crew:
+                crew_table = 'movie_crew'
+                try:
+                    if not execute_query("SHOW TABLES LIKE 'movie_crew'") and execute_query("SHOW TABLES LIKE 'tmdb_movie_crew'"):
+                        crew_table = 'tmdb_movie_crew'
+                except Exception:
+                    pass
+                joins.append(f"JOIN {crew_table} crF ON m.id = crF.movie_id")
+                or_count = len(crew)
+                for name in crew:
+                    params_local.append(f"%{name.lower()}%")
+                where_clauses.append("(" + " OR ".join(["LOWER(crF.name) LIKE %s"]*or_count) + ")")
+
+            if include_genres and genres:
+                joins.append("JOIN tmdb_movie_genres mgF ON m.id = mgF.movie_id")
+                or_count = len(genres)
+                for g in genres:
+                    params_local.append(f"%{g.lower()}%")
+                where_clauses.append("(" + " OR ".join(["LOWER(mgF.tmdb_genres) LIKE %s"]*or_count) + ")")
+
+            if include_languages and languages:
+                or_count = len(languages)
+                placeholders = ",".join(["%s"]*or_count)
+                where_clauses.append(f"m.original_language IN ({placeholders})")
+                for lang in languages:
+                    params_local.append(lang)
+
+            # Semantic search optional join
+            semantic_threshold_primary = 0.5
+            semantic_threshold_fallback = 0.3
+            embedding_json = None
+            similarity_select = ""
+            having_clause = ""
+            params_with_sem = list(params_local)
+            if semantic_query:
+                model = SentenceTransformer('all-MiniLM-L6-v2')
+                emb = model.encode(semantic_query)
+                embedding_json = json.dumps(emb.tolist())
+                joins.append("JOIN movie_embeddings me ON m.id = me.movie_id")
+                similarity_select = ", COSINE_SIMILARITY(me.embedding_vector, %s) as similarity_score"
+                having_clause = " HAVING similarity_score >= %s"
+                params_with_sem.append(embedding_json)
+                params_with_sem.append(semantic_threshold_primary if use_primary_semantic else semantic_threshold_fallback)
+
+            # Watched filter
+            if include_watched and watched is True:
+                where_clauses.append("ur.rating IS NOT NULL")
+            elif include_watched and watched is False:
+                where_clauses.append("ur.rating IS NULL")
+
+            select = """
+                SELECT 
+                    m.id,
+                    m.title,
+                    m.overview,
+                    m.poster_path,
+                    DATE_FORMAT(m.release_date, '%Y-%m-%d') as release_date,
+                    m.original_language,
+                    m.popularity,
+                    m.vote_count,
+                    m.vote_average,
+                    r.predicted_rating,
+                    ur.rating as user_rating,
+                    CASE 
+                        WHEN ur.rating IS NOT NULL THEN SQRT(r.predicted_rating * ur.rating)
+                        ELSE (r.predicted_rating)
+                    END as predicted_star_rating,
+                    CASE WHEN ur.rating IS NOT NULL THEN 1 ELSE 0 END as watched,
+                    CASE WHEN w.id IS NOT NULL THEN TRUE ELSE FALSE END as is_watchlisted
+            """
+
+            query_local = select + similarity_select + "\n" + "\n".join(joins)
+            if where_clauses:
+                query_local += "\nWHERE " + " AND ".join(where_clauses)
+            if semantic_query:
+                query_local += having_clause
+            query_local += "\nORDER BY (predicted_star_rating + 0.04 * m.vote_average * LOG10(GREATEST(m.vote_count, 1))) DESC\nLIMIT %s"
+
+            exec_params = tuple(params_with_sem + [limit])
+           
+            result_rows = execute_query(query_local, exec_params)
+            logger.info("[filtered] rows returned=%d", len(result_rows) if result_rows else 0)
+            
+            return result_rows
+
+        # First attempt with all provided filters and semantic primary threshold
+        rows = build_and_execute(
+            include_cast=True,
+            include_crew=True,
+            include_genres=True,
+            include_languages=True,
+            include_watched=True,
+            use_primary_semantic=True
+        )
+
+        # Semantic fallback if needed
+        if semantic_query and not rows:
+            logger.info("[filtered] empty on primary threshold; trying semantic fallback threshold")
+            rows = build_and_execute(
+                include_cast=True,
+                include_crew=True,
+                include_genres=True,
+                include_languages=True,
+                include_watched=True,
+                use_primary_semantic=False
+            )
+
+        # Progressive relaxation on empty
+        if not rows:
+            logger.info("[filtered] empty; dropping watched filter")
+           
+            # Drop watched
+            rows = build_and_execute(True, True, True, True, False, True)
+        if semantic_query and not rows:
+            logger.info("[filtered] still empty; try with semantic fallback without watched")
+            rows = build_and_execute(True, True, True, True, False, False)
+        if not rows:
+            logger.info("[filtered] still empty; dropping genres")
+            # Drop genres
+            rows = build_and_execute(True, True, False, True, False, True)
+        if semantic_query and not rows:
+            logger.info("[filtered] still empty; genres dropped with semantic fallback")
+            rows = build_and_execute(True, True, False, True, False, False)
+        if not rows:
+            logger.info("[filtered] still empty; dropping languages")
+            # Drop languages
+            rows = build_and_execute(True, True, False, False, False, True)
+        if semantic_query and not rows:
+            logger.info("[filtered] still empty; languages dropped with semantic fallback")
+            rows = build_and_execute(True, True, False, False, False, False)
+        if not rows:
+            logger.info("[filtered] still empty; dropping cast")
+            # Drop cast
+            rows = build_and_execute(False, True, False, False, False, True)
+        if semantic_query and not rows:
+            logger.info("[filtered] still empty; cast dropped with semantic fallback")
+            rows = build_and_execute(False, True, False, False, False, False)
+        if not rows:
+            logger.info("[filtered] still empty; dropping crew")
+            # Drop crew
+            rows = build_and_execute(False, False, False, False, False, True)
+        if semantic_query and not rows:
+            logger.info("[filtered] still empty; crew dropped with semantic fallback")
+            rows = build_and_execute(False, False, False, False, False, False)
+
+        for row in rows:
+            row["is_watchlisted"] = bool(row.get("is_watchlisted", False))
+        return rows
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error getting filtered recommendations: {str(e)}")
 
 if __name__ == "__main__":
     import uvicorn

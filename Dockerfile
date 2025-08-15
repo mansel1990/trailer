@@ -14,7 +14,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Use a specific index URL for torch+cpu to avoid CUDA binaries
 COPY requirements.txt .
 RUN pip install --no-cache-dir \
-    -f https://download.pytorch.org/whl/torch_stable.html \
+    -f https://download.pytorch.org/whl/cpu/torch_stable.html \
     -r requirements.txt
 
 # Pre-download the SentenceTransformer model during build

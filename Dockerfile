@@ -19,8 +19,18 @@ RUN pip install --no-cache-dir \
 
 # Pre-download the SentenceTransformer model during build
 # This avoids large downloads during runtime/startup on Railway
-ENV SENTENCE_TRANSFORMERS_HOME=/app/models
-RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('all-MiniLM-L6-v2')"
+RUN mkdir -p /app/models
+ENV HF_HOME=/app/models
+RUN \
+    attempt=0; \
+    max_attempts=5; \
+    until [ $attempt -ge $max_attempts ]; do \
+        echo "Attempt $((attempt+1)) of $max_attempts: Downloading SentenceTransformer model..."; \
+        python -c "from huggingface_hub import snapshot_download; snapshot_download(repo_id='sentence-transformers/all-MiniLM-L6-v2', cache_dir='/app/models', resume_download=True, local_files_only=False)" && break; \
+        attempt=$((attempt+1)); \
+        sleep 5; \
+    done \
+    && if [ $attempt -ge $max_attempts ]; then echo "Failed to download model after $max_attempts attempts."; exit 1; fi
 
 # Copy your application code
 COPY . .

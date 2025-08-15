@@ -4,7 +4,7 @@ from typing import List, Optional, Dict
 import asyncio
 import os
 import logging, sys
-logging.basicConfig(level=logging.DEBUG, handlers=[logging.StreamHandler(sys.stdout)])
+logging.basicConfig(level=logging.DEBUG, handlers=[logging.StreamHandler(sys.stdout), logging.FileHandler('app_debug.log')])
 logger = logging.getLogger()
 import sys
 
